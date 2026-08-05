@@ -1,0 +1,28 @@
+[package]
+name = "fissa-wt"
+version = "0.1.0"
+description = "Instant git worktrees, with optional npm node_modules reuse"
+authors = ["rznn7 <160644362+rznn7@users.noreply.github.com>"]
+license = "MIT"
+edition = "2024"
+repository = "https://github.com/rznn7/fissa-wt"
+keywords = ["git", "worktree", "tui", "cli"]
+categories = ["command-line-utilities", "development-tools"]
+
+[[bin]]
+name = "fissa"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1.0"
+crossterm = "0.29"
+ratatui = { version = "0.30", features = ["crossterm_0_29"] }
+
+[dev-dependencies]
+tempfile = "3"
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "s"
+strip = true
