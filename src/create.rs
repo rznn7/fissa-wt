@@ -6,8 +6,6 @@ use crate::node::{self, Strategy, Target};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Action {
     AddWorktree { branch: String, base: String },
-    Hardlink { rel: PathBuf },
-    Symlink { rel: PathBuf },
     Install { rel: PathBuf },
 }
 
@@ -25,7 +23,6 @@ pub enum Progress {
 }
 
 pub struct Request {
-    pub source: PathBuf,
     pub dest: PathBuf,
     pub steps: Vec<Step>,
 }
@@ -47,16 +44,9 @@ pub fn plan_steps(branch: &str, base: &str, strategy: Strategy, targets: &[Targe
             format!("{}/node_modules", rel.to_string_lossy())
         };
 
-        let action = match strategy {
-            Strategy::Hardlink => Action::Hardlink { rel },
-            Strategy::Symlink => Action::Symlink { rel },
-            Strategy::Install => Action::Install { rel },
-            Strategy::None => continue,
-        };
-
         steps.push(Step {
             label: shown,
-            action,
+            action: Action::Install { rel },
         });
     }
 
@@ -66,7 +56,7 @@ pub fn plan_steps(branch: &str, base: &str, strategy: Strategy, targets: &[Targe
 pub fn skip_reason(dest: &Path, step: &Step) -> Option<&'static str> {
     let rel = match &step.action {
         Action::AddWorktree { .. } => return None,
-        Action::Hardlink { rel } | Action::Symlink { rel } | Action::Install { rel } => rel,
+        Action::Install { rel } => rel,
     };
     if dest.join(rel).is_dir() {
         None
@@ -105,18 +95,6 @@ fn run_step(repo_source: &Path, request: &Request, step: &Step) -> anyhow::Resul
             repo.add_worktree(&request.dest, branch, base)?;
             Ok(String::from("created"))
         }
-        Action::Hardlink { rel } => {
-            let src = request.source.join(rel).join("node_modules");
-            let dst = request.dest.join(rel).join("node_modules");
-            node::hardlink_modules(&src, &dst)?;
-            Ok(format!("hardlinked ({} pkgs)", node::package_count(&dst)))
-        }
-        Action::Symlink { rel } => {
-            let src = request.source.join(rel).join("node_modules");
-            let dst = request.dest.join(rel).join("node_modules");
-            node::symlink_modules(&src, &dst)?;
-            Ok(String::from("symlinked"))
-        }
         Action::Install { rel } => {
             let dir = request.dest.join(rel);
             node::npm_ci(&dir)?;
@@ -133,12 +111,10 @@ mod tests {
         vec![
             Target {
                 rel: PathBuf::from("app"),
-                has_source_modules: true,
                 has_lockfile: true,
             },
             Target {
                 rel: PathBuf::from("tools"),
-                has_source_modules: false,
                 has_lockfile: true,
             },
         ]
@@ -149,12 +125,10 @@ mod tests {
         let targets = vec![
             Target {
                 rel: PathBuf::new(),
-                has_source_modules: false,
                 has_lockfile: false,
             },
             Target {
                 rel: PathBuf::from("app"),
-                has_source_modules: false,
                 has_lockfile: true,
             },
         ];
@@ -172,26 +146,11 @@ mod tests {
     }
 
     #[test]
-    fn test_plan_steps_hardlink_covers_only_targets_with_source_modules() {
-        let steps = plan_steps("feature/x", "develop", Strategy::Hardlink, &targets());
-        assert_eq!(steps.len(), 2);
-        assert!(matches!(steps[1].action, Action::Hardlink { .. }));
-        assert!(steps[1].label.contains("app"));
-    }
-
-    #[test]
     fn test_plan_steps_install_covers_every_package() {
         let steps = plan_steps("feature/x", "develop", Strategy::Install, &targets());
         assert_eq!(steps.len(), 3);
         assert!(matches!(steps[1].action, Action::Install { .. }));
         assert!(matches!(steps[2].action, Action::Install { .. }));
-    }
-
-    #[test]
-    fn test_plan_steps_symlink_produces_symlink_actions() {
-        let steps = plan_steps("feature/x", "develop", Strategy::Symlink, &targets());
-        assert_eq!(steps.len(), 2);
-        assert!(matches!(steps[1].action, Action::Symlink { .. }));
     }
 
     #[test]
@@ -213,7 +172,7 @@ mod tests {
         std::fs::create_dir_all(tmp.path().join("app")).unwrap();
         let step = Step {
             label: String::from("app/node_modules"),
-            action: Action::Hardlink {
+            action: Action::Install {
                 rel: PathBuf::from("app"),
             },
         };

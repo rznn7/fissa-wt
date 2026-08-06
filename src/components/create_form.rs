@@ -302,12 +302,7 @@ mod tests {
                 String::new(),
             ],
             String::from("develop"),
-            vec![
-                Strategy::Hardlink,
-                Strategy::Symlink,
-                Strategy::Install,
-                Strategy::None,
-            ],
+            vec![Strategy::Install, Strategy::None],
         )
     }
 
@@ -477,23 +472,7 @@ mod tests {
     #[test]
     fn test_right_on_modules_field_selects_the_next_strategy() {
         let mut form = form();
-        assert_eq!(form.strategy(), Strategy::Hardlink);
-        for _ in 0..3 {
-            form.handle_event_key(key(KeyCode::Tab));
-        }
-        form.handle_event_key(key(KeyCode::Right));
-        assert_eq!(form.strategy(), Strategy::Symlink);
-    }
-
-    #[test]
-    fn test_modules_field_only_offers_allowed_strategies() {
-        let mut form = CreateForm::new(
-            String::from("spectra"),
-            vec![String::from("feature/")],
-            String::from("develop"),
-            vec![Strategy::Symlink, Strategy::None],
-        );
-        assert_eq!(form.strategy(), Strategy::Symlink);
+        assert_eq!(form.strategy(), Strategy::Install);
         for _ in 0..3 {
             form.handle_event_key(key(KeyCode::Tab));
         }
@@ -539,7 +518,7 @@ mod tests {
         assert!(text.contains("feature/spe-11667"), "{text}");
         assert!(text.contains("spectra-spe-11667"), "{text}");
         assert!(text.contains("directory already exists"), "{text}");
-        assert!(text.contains("hardlink"), "{text}");
+        assert!(text.contains("install"), "{text}");
     }
 
     #[test]

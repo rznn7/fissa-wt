@@ -237,7 +237,7 @@ impl App {
         let allowed = if targets.is_empty() {
             Vec::new()
         } else {
-            node::available_strategies(&self.repo.source, &self.dest_parent(), &targets)
+            node::available_strategies(&targets)
         };
 
         self.form = Some(CreateForm::new(
@@ -277,7 +277,6 @@ impl App {
         create::spawn(
             self.repo.source.clone(),
             create::Request {
-                source: self.repo.source.clone(),
                 dest: dest.clone(),
                 steps,
             },
