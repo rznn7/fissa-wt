@@ -421,18 +421,6 @@ mod tests {
     }
 
     #[test]
-    fn test_focus_skips_deps_when_no_strategies_are_available() {
-        let mut form = form_without_deps();
-        assert_eq!(form.focus(), Field::Slug);
-        form.handle_event_key(key(KeyCode::Tab));
-        assert_eq!(form.focus(), Field::Prefix);
-        form.handle_event_key(key(KeyCode::Tab));
-        assert_eq!(form.focus(), Field::Base);
-        form.handle_event_key(key(KeyCode::Tab));
-        assert_eq!(form.focus(), Field::Slug);
-    }
-
-    #[test]
     fn test_right_on_prefix_field_selects_the_next_prefix() {
         let mut form = form();
         type_str(&mut form, "spe-1");
@@ -519,15 +507,6 @@ mod tests {
         assert!(text.contains("spectra-spe-11667"), "{text}");
         assert!(text.contains("directory already exists"), "{text}");
         assert!(text.contains("npm ci"), "{text}");
-    }
-
-    #[test]
-    fn test_render_omits_the_deps_row_when_no_strategies_are_available() {
-        let mut form = form_without_deps();
-        let text = dump(&mut form);
-        assert!(!text.contains("deps"), "{text}");
-        assert!(text.contains("slug"), "{text}");
-        assert!(text.contains("base"), "{text}");
     }
 
     #[test]

@@ -78,4 +78,4 @@ make lint
 make install
 ```
 
-See `TESTING.md` for the testing strategy and `design-docs/` for the design.
+See `TESTING.md` for the testing strategy and `docs/superpowers/specs/` for the design.
