@@ -35,7 +35,7 @@ pub fn restore_terminal() -> Result<()> {
     Ok(())
 }
 
-pub fn build_rows(repo: &Repo, targets: &[node::Target]) -> Result<Vec<Row>> {
+pub fn build_rows(repo: &Repo) -> Result<Vec<Row>> {
     let mut rows = Vec::new();
 
     for entry in repo.worktrees()? {
@@ -49,7 +49,6 @@ pub fn build_rows(repo: &Repo, targets: &[node::Target]) -> Result<Vec<Row>> {
                 .clone()
                 .unwrap_or_else(|| String::from("(detached)")),
             dirty: repo.is_dirty(&entry.path),
-            nm: node::nm_state(&entry.path, targets),
             path: entry.path,
         });
     }
@@ -87,13 +86,11 @@ pub fn progress_action(finished: bool, failed: bool, code: KeyCode) -> ProgressA
 }
 
 fn make_list(repo: &Repo) -> Result<ListComponent> {
-    let targets = node::discover_targets(&repo.source);
-    let rows = build_rows(repo, &targets)?;
+    let rows = build_rows(repo)?;
     Ok(ListComponent::new(
         repo.main_dir_name(),
         rows,
         shell::wrapper_active(),
-        !targets.is_empty(),
     ))
 }
 
@@ -517,26 +514,9 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         let repo = repo_with_a_second_worktree(&root);
 
-        let rows = build_rows(&repo, &[]).unwrap();
+        let rows = build_rows(&repo).unwrap();
         let labels: Vec<&str> = rows.iter().map(|r| r.label.as_str()).collect();
         assert_eq!(rows.len(), 2);
         assert!(labels.contains(&"side"), "{labels:?}");
-    }
-
-    #[test]
-    fn test_build_rows_reports_node_modules_state_per_worktree() {
-        let tmp = tempfile::tempdir().unwrap();
-        let root = tmp.path().join("main");
-        std::fs::create_dir_all(&root).unwrap();
-        let repo = repo_with_a_second_worktree(&root);
-        std::fs::write(root.join("package.json"), "{}").unwrap();
-        std::fs::create_dir_all(root.join("node_modules")).unwrap();
-
-        let targets = node::discover_targets(&repo.source);
-        let rows = build_rows(&repo, &targets).unwrap();
-        let main_row = rows.iter().find(|r| r.label == "main").unwrap();
-        let side_row = rows.iter().find(|r| r.label == "side").unwrap();
-        assert_eq!(main_row.nm, node::NmState::Own);
-        assert_eq!(side_row.nm, node::NmState::Missing);
     }
 }

@@ -87,40 +87,6 @@ pub fn targets_for(strategy: Strategy, targets: &[Target]) -> Vec<&Target> {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum NmState {
-    Own,
-    Link,
-    Missing,
-}
-
-impl NmState {
-    pub fn label(&self) -> &'static str {
-        match self {
-            NmState::Own => "own",
-            NmState::Link => "link",
-            NmState::Missing => "—",
-        }
-    }
-}
-
-pub fn nm_state(worktree_root: &Path, targets: &[Target]) -> NmState {
-    let mut state = NmState::Missing;
-    for target in targets {
-        let modules = worktree_root.join(&target.rel).join("node_modules");
-        let Ok(metadata) = std::fs::symlink_metadata(&modules) else {
-            continue;
-        };
-        if metadata.file_type().is_symlink() {
-            return NmState::Link;
-        }
-        if metadata.file_type().is_dir() {
-            state = NmState::Own;
-        }
-    }
-    state
-}
-
 /// Captures npm's output rather than inheriting it: the TUI owns stderr.
 pub fn npm_ci(dir: &Path) -> Result<()> {
     let output = Command::new("npm")
@@ -340,36 +306,6 @@ mod tests {
             has_lockfile: true,
         }];
         assert!(targets_for(Strategy::None, &targets).is_empty());
-    }
-
-    #[test]
-    fn test_nm_state_real_directory_is_own() {
-        let tmp = tempfile::tempdir().unwrap();
-        let root = tmp.path();
-        write_pkg(root, "app");
-        write_modules(root, "app");
-        let targets = discover_targets(root);
-        assert_eq!(nm_state(root, &targets), NmState::Own);
-    }
-
-    #[test]
-    fn test_nm_state_symlink_is_link() {
-        let tmp = tempfile::tempdir().unwrap();
-        let root = tmp.path();
-        write_pkg(root, "app");
-        std::fs::create_dir_all(root.join("real")).unwrap();
-        std::os::unix::fs::symlink(root.join("real"), root.join("app/node_modules")).unwrap();
-        let targets = discover_targets(root);
-        assert_eq!(nm_state(root, &targets), NmState::Link);
-    }
-
-    #[test]
-    fn test_nm_state_absent_is_missing() {
-        let tmp = tempfile::tempdir().unwrap();
-        let root = tmp.path();
-        write_pkg(root, "app");
-        let targets = discover_targets(root);
-        assert_eq!(nm_state(root, &targets), NmState::Missing);
     }
 
     #[test]
