@@ -14,8 +14,8 @@ impl Strategy {
 
     pub fn label(&self) -> &'static str {
         match self {
-            Strategy::Install => "install",
-            Strategy::None => "none",
+            Strategy::Install => "npm ci",
+            Strategy::None => "skip",
         }
     }
 }
@@ -330,5 +330,11 @@ mod tests {
 
         let targets = discover_targets(root);
         assert_eq!(available_strategies(&targets), vec![Strategy::None]);
+    }
+
+    #[test]
+    fn test_strategy_labels_name_the_command_that_runs() {
+        assert_eq!(Strategy::Install.label(), "npm ci");
+        assert_eq!(Strategy::None.label(), "skip");
     }
 }

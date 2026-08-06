@@ -231,11 +231,7 @@ impl App {
 
     fn open_form(&mut self) {
         let targets = node::discover_targets(&self.repo.source);
-        let allowed = if targets.is_empty() {
-            Vec::new()
-        } else {
-            node::available_strategies(&targets)
-        };
+        let allowed = node::available_strategies(&targets);
 
         self.form = Some(CreateForm::new(
             self.repo.main_dir_name(),

@@ -14,7 +14,7 @@ pub enum Field {
     Slug,
     Prefix,
     Base,
-    Modules,
+    Deps,
 }
 
 pub struct CreateForm {
@@ -40,8 +40,8 @@ impl CreateForm {
         allowed: Vec<Strategy>,
     ) -> Self {
         let mut fields = vec![Field::Slug, Field::Prefix, Field::Base];
-        if !allowed.is_empty() {
-            fields.push(Field::Modules);
+        if allowed.contains(&Strategy::Install) {
+            fields.push(Field::Deps);
         }
         Self {
             repo_dir,
@@ -68,8 +68,8 @@ impl CreateForm {
         self.focus
     }
 
-    pub fn shows_modules(&self) -> bool {
-        !self.allowed.is_empty()
+    pub fn shows_deps(&self) -> bool {
+        self.allowed.contains(&Strategy::Install)
     }
 
     pub fn prefix(&self) -> &str {
@@ -141,7 +141,7 @@ impl CreateForm {
             Field::Prefix => {
                 self.prefix_index = Self::cycle(self.prefix_index, self.prefixes.len(), delta);
             }
-            Field::Modules => {
+            Field::Deps => {
                 self.strategy_index = Self::cycle(self.strategy_index, self.allowed.len(), delta);
             }
             _ => {}
@@ -197,15 +197,15 @@ impl Component for CreateForm {
             format!("{} prefix   {}", marker(Field::Prefix), prefix_display),
             format!("{} base     {}", marker(Field::Base), self.base),
         ];
-        if self.shows_modules() {
+        if self.shows_deps() {
             lines.push(format!(
-                "{} modules  ‹ {} ›",
-                marker(Field::Modules),
+                "{} deps     ‹ {} ›",
+                marker(Field::Deps),
                 self.strategy().label()
             ));
         }
 
-        // Only the typed fields get a cursor; prefix and modules are cycled with ←/→.
+        // Only the typed fields get a cursor; prefix and deps are cycled with ←/→.
         if matches!(self.focus, Field::Slug | Field::Base)
             && let Some(row) = self.fields.iter().position(|field| *field == self.focus)
             && let Some(line) = lines.get(row)
@@ -306,7 +306,7 @@ mod tests {
         )
     }
 
-    fn form_without_modules() -> CreateForm {
+    fn form_without_deps() -> CreateForm {
         CreateForm::new(
             String::from("spectra"),
             vec![String::from("feature/")],
@@ -380,7 +380,7 @@ mod tests {
         form.handle_event_key(key(KeyCode::Tab));
         assert_eq!(form.focus(), Field::Base);
         form.handle_event_key(key(KeyCode::Tab));
-        assert_eq!(form.focus(), Field::Modules);
+        assert_eq!(form.focus(), Field::Deps);
         form.handle_event_key(key(KeyCode::Tab));
         assert_eq!(form.focus(), Field::Slug);
     }
@@ -410,19 +410,19 @@ mod tests {
     fn test_up_arrow_from_the_first_field_wraps_to_the_last() {
         let mut form = form();
         form.handle_event_key(key(KeyCode::Up));
-        assert_eq!(form.focus(), Field::Modules);
+        assert_eq!(form.focus(), Field::Deps);
     }
 
     #[test]
     fn test_shift_tab_moves_to_the_previous_field() {
         let mut form = form();
         form.handle_event_key(key(KeyCode::BackTab));
-        assert_eq!(form.focus(), Field::Modules);
+        assert_eq!(form.focus(), Field::Deps);
     }
 
     #[test]
-    fn test_focus_skips_modules_when_no_strategies_are_available() {
-        let mut form = form_without_modules();
+    fn test_focus_skips_deps_when_no_strategies_are_available() {
+        let mut form = form_without_deps();
         assert_eq!(form.focus(), Field::Slug);
         form.handle_event_key(key(KeyCode::Tab));
         assert_eq!(form.focus(), Field::Prefix);
@@ -470,7 +470,7 @@ mod tests {
     }
 
     #[test]
-    fn test_right_on_modules_field_selects_the_next_strategy() {
+    fn test_right_on_the_deps_field_selects_the_next_strategy() {
         let mut form = form();
         assert_eq!(form.strategy(), Strategy::Install);
         for _ in 0..3 {
@@ -482,7 +482,7 @@ mod tests {
 
     #[test]
     fn test_strategy_is_none_when_no_strategies_are_available() {
-        let form = form_without_modules();
+        let form = form_without_deps();
         assert_eq!(form.strategy(), Strategy::None);
     }
 
@@ -518,14 +518,14 @@ mod tests {
         assert!(text.contains("feature/spe-11667"), "{text}");
         assert!(text.contains("spectra-spe-11667"), "{text}");
         assert!(text.contains("directory already exists"), "{text}");
-        assert!(text.contains("install"), "{text}");
+        assert!(text.contains("npm ci"), "{text}");
     }
 
     #[test]
-    fn test_render_omits_the_modules_row_when_no_strategies_are_available() {
-        let mut form = form_without_modules();
+    fn test_render_omits_the_deps_row_when_no_strategies_are_available() {
+        let mut form = form_without_deps();
         let text = dump(&mut form);
-        assert!(!text.contains("modules"), "{text}");
+        assert!(!text.contains("deps"), "{text}");
         assert!(text.contains("slug"), "{text}");
         assert!(text.contains("base"), "{text}");
     }
@@ -579,7 +579,7 @@ mod tests {
     }
 
     #[test]
-    fn test_the_modules_field_hides_the_cursor() {
+    fn test_the_deps_field_hides_the_cursor() {
         let mut form = form();
         for _ in 0..3 {
             form.handle_event_key(key(KeyCode::Down));
@@ -593,5 +593,44 @@ mod tests {
         let text = dump(&mut form());
         assert!(text.contains("tab/↑↓ field"), "{text}");
         assert!(text.contains("←→ cycle"), "{text}");
+    }
+
+    #[test]
+    fn test_render_labels_the_deps_row_with_the_command() {
+        let mut form = form();
+        let text = dump(&mut form);
+        assert!(text.contains("deps"), "{text}");
+        assert!(text.contains("npm ci"), "{text}");
+        assert!(!text.contains("modules"), "{text}");
+    }
+
+    #[test]
+    fn test_render_omits_the_deps_row_when_install_is_unavailable() {
+        let mut form = CreateForm::new(
+            String::from("spectra"),
+            vec![String::from("feature/")],
+            String::from("develop"),
+            vec![Strategy::None],
+        );
+        let text = dump(&mut form);
+        assert!(!text.contains("deps"), "{text}");
+        assert!(text.contains("slug"), "{text}");
+    }
+
+    #[test]
+    fn test_focus_skips_deps_when_install_is_unavailable() {
+        let mut form = CreateForm::new(
+            String::from("spectra"),
+            vec![String::from("feature/")],
+            String::from("develop"),
+            vec![Strategy::None],
+        );
+        assert_eq!(form.focus(), Field::Slug);
+        form.handle_event_key(key(KeyCode::Tab));
+        assert_eq!(form.focus(), Field::Prefix);
+        form.handle_event_key(key(KeyCode::Tab));
+        assert_eq!(form.focus(), Field::Base);
+        form.handle_event_key(key(KeyCode::Tab));
+        assert_eq!(form.focus(), Field::Slug);
     }
 }
