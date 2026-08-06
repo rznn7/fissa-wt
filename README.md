@@ -1,6 +1,6 @@
 # fissa-wt
 
-A TUI for git worktrees — create one from a short slug, reuse its npm `node_modules`,
+A TUI for git worktrees — create one from a short slug, run `npm ci` for it,
 and `cd` straight into it.
 
 `fissa` is French slang for "quickly", which is the whole point: creating a worktree
@@ -46,32 +46,23 @@ becomes the branch name verbatim.
 The form previews the branch and directory live, and refuses to create anything if the
 directory exists, the branch is taken, or the base ref is unknown.
 
-## node_modules
+## npm
 
 This is an add-on, not the core — `fissa` works on any git repo in any language, and the
-whole modules column and form row disappear on a repo with no `package.json`.
+whole `deps` form row disappears on a repo with no `package.json`.
 
-New worktrees can reuse the modules of the worktree you launched from, instead of
-running a full install. Every directory holding a `package.json` is handled, at any
-depth — except under `install`, which covers only the directories that also hold a
-`package-lock.json` (or `npm-shrinkwrap.json`), since `npm ci` refuses to run without
-one. A marker `package.json` at the root of a monorepo is therefore left alone rather
-than failing the creation.
+New worktrees can run `npm ci` for you, so the worktree is ready to build the moment you
+land in it. Every directory holding a `package.json` next to a `package-lock.json` (or
+`npm-shrinkwrap.json`) is installed, at any depth. A marker `package.json` at the root of
+a monorepo has no lockfile and is therefore left alone rather than failing the creation,
+since `npm ci` refuses to run without one.
 
-| Strategy | Cost | Isolation |
+| Strategy | Cost | Result |
 |---|---|---|
-| `hardlink` (default) | ~1s, ~5% of the tree | full — npm cannot affect other worktrees |
-| `symlink` | instant, 0 bytes | none — one shared tree, `npm install` prunes it for everyone |
-| `install` | `npm ci`, minutes | full — needs a lockfile |
-| `none` | — | — |
+| `npm ci` (default) | minutes | a worktree you can build immediately |
+| `skip` | — | no `node_modules`; install it yourself |
 
-Measured on a 1073 MB, 1118-package tree: **1 second** and **52 MB**. File contents are
-shared via hardlinks; the 5% is the directory entries, which cannot be hardlinked. Note
-that `du` on a single worktree still reports the full ~1 GB, because it counts each shared
-inode once per traversal — which is why there is no size column in the list.
-
-Removing a worktree created this way never touches the source; `git worktree remove`
-deletes hardlinks, not the shared file contents.
+The `deps` row only appears when at least one package has a lockfile.
 
 A package that exists in the source but not in the new worktree — typically a vendored
 `package.json` inside a gitignored build directory — is reported as
