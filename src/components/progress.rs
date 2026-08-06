@@ -154,7 +154,7 @@ mod tests {
             String::from("creating spectra-spe-11667"),
             vec![
                 String::from("git worktree add  feature/spe-11667"),
-                String::from("app/node_modules"),
+                String::from("npm ci  app"),
             ],
             shell_init,
         )
@@ -238,7 +238,7 @@ mod tests {
         let text = dump(&mut component);
         assert!(text.contains("feature/spe-11667"), "{text}");
         assert!(text.contains("created"), "{text}");
-        assert!(text.contains("app/node_modules"), "{text}");
+        assert!(text.contains("npm ci  app"), "{text}");
         assert!(text.contains('✓'), "{text}");
     }
 
@@ -248,7 +248,7 @@ mod tests {
             String::from("creating spectra-fissa-smoke-test"),
             vec![
                 String::from("git worktree add  feature/fissa-smoke-test"),
-                String::from("app/node_modules"),
+                String::from("npm ci  app"),
             ],
             true,
         );

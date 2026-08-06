@@ -39,9 +39,9 @@ pub fn plan_steps(branch: &str, base: &str, strategy: Strategy, targets: &[Targe
     for target in node::targets_for(strategy, targets) {
         let rel = target.rel.clone();
         let shown = if rel.as_os_str().is_empty() {
-            String::from("node_modules")
+            String::from("npm ci")
         } else {
-            format!("{}/node_modules", rel.to_string_lossy())
+            format!("npm ci  {}", rel.to_string_lossy())
         };
 
         steps.push(Step {
@@ -134,7 +134,7 @@ mod tests {
         ];
         let steps = plan_steps("feature/x", "develop", Strategy::Install, &targets);
         assert_eq!(steps.len(), 2);
-        assert_eq!(steps[1].label, "app/node_modules");
+        assert_eq!(steps[1].label, "npm ci  app");
     }
 
     #[test]
@@ -192,5 +192,22 @@ mod tests {
             skip_reason(tmp.path(), &step),
             Some("skipped (not in this worktree)")
         );
+    }
+
+    #[test]
+    fn test_plan_steps_labels_a_root_package_with_the_bare_command() {
+        let targets = vec![Target {
+            rel: PathBuf::new(),
+            has_lockfile: true,
+        }];
+        let steps = plan_steps("feature/x", "develop", Strategy::Install, &targets);
+        assert_eq!(steps[1].label, "npm ci");
+    }
+
+    #[test]
+    fn test_plan_steps_labels_a_nested_package_with_its_path() {
+        let steps = plan_steps("feature/x", "develop", Strategy::Install, &targets());
+        assert_eq!(steps[1].label, "npm ci  app");
+        assert_eq!(steps[2].label, "npm ci  tools");
     }
 }
