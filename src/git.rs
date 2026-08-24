@@ -119,7 +119,7 @@ pub fn prefix_options(branches: &[String]) -> Vec<String> {
         prefixes.insert(0, feature);
     }
 
-    prefixes.push(String::new());
+    prefixes.insert(0, String::new());
     prefixes
 }
 
@@ -460,7 +460,7 @@ prunable gitdir file points to non-existent location
     }
 
     #[test]
-    fn test_prefix_options_puts_feature_first_then_sorted_then_none() {
+    fn test_prefix_options_puts_none_first_then_feature_then_sorted() {
         let branches = vec![
             "chore/a".to_string(),
             "feature/b".to_string(),
@@ -469,20 +469,20 @@ prunable gitdir file points to non-existent location
         ];
         assert_eq!(
             prefix_options(&branches),
-            vec!["feature/", "bugfix/", "chore/", ""]
+            vec!["", "feature/", "bugfix/", "chore/"]
         );
     }
 
     #[test]
-    fn test_prefix_options_without_feature_still_appends_none() {
+    fn test_prefix_options_without_feature_still_leads_with_none() {
         let branches = vec!["chore/a".to_string()];
-        assert_eq!(prefix_options(&branches), vec!["chore/", ""]);
+        assert_eq!(prefix_options(&branches), vec!["", "chore/"]);
     }
 
     #[test]
     fn test_prefix_options_deduplicates() {
         let branches = vec!["fix/a".to_string(), "fix/b".to_string()];
-        assert_eq!(prefix_options(&branches), vec!["fix/", ""]);
+        assert_eq!(prefix_options(&branches), vec!["", "fix/"]);
     }
 
     #[test]
