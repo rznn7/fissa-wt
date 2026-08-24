@@ -1,10 +1,12 @@
-use crossterm::event::{KeyCode, KeyEvent, KeyEventKind};
+use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::Stylize;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Paragraph, Widget};
 
+use crate::components::text_input::TextInput;
+use crate::components::theme;
 use crate::components::{Component, KeyEventResponse};
 use crate::naming;
 use crate::node::Strategy;
@@ -19,10 +21,10 @@ pub enum Field {
 
 pub struct CreateForm {
     repo_dir: String,
-    slug: String,
+    slug: TextInput,
     prefixes: Vec<String>,
     prefix_index: usize,
-    base: String,
+    base: TextInput,
     allowed: Vec<Strategy>,
     strategy_index: usize,
     fields: Vec<Field>,
@@ -45,14 +47,14 @@ impl CreateForm {
         }
         Self {
             repo_dir,
-            slug: String::new(),
+            slug: TextInput::new(String::new()),
             prefixes: if prefixes.is_empty() {
                 vec![String::new()]
             } else {
                 prefixes
             },
             prefix_index: 0,
-            base,
+            base: TextInput::new(base),
             allowed,
             strategy_index: 0,
             fields,
@@ -80,11 +82,28 @@ impl CreateForm {
     }
 
     pub fn prefix_overridden(&self) -> bool {
-        self.slug.contains('/')
+        self.slug.value().contains('/')
     }
 
     pub fn base(&self) -> &str {
-        &self.base
+        self.base.value()
+    }
+
+    /// The focused field when it is one that accepts typing.
+    fn focused_text(&self) -> Option<&TextInput> {
+        match self.focus {
+            Field::Slug => Some(&self.slug),
+            Field::Base => Some(&self.base),
+            _ => None,
+        }
+    }
+
+    fn focused_text_mut(&mut self) -> Option<&mut TextInput> {
+        match self.focus {
+            Field::Slug => Some(&mut self.slug),
+            Field::Base => Some(&mut self.base),
+            _ => None,
+        }
     }
 
     pub fn strategy(&self) -> Strategy {
@@ -107,7 +126,7 @@ impl CreateForm {
     }
 
     fn names(&self) -> Option<naming::Names> {
-        naming::derive_names(&self.slug, self.prefix(), &self.repo_dir)
+        naming::derive_names(self.slug.value(), self.prefix(), &self.repo_dir)
     }
 
     pub fn branch(&self) -> Option<String> {
@@ -149,31 +168,59 @@ impl CreateForm {
     }
 
     fn push_char(&mut self, ch: char) {
-        match self.focus {
-            Field::Slug => self.slug.push(ch),
-            Field::Base => self.base.push(ch),
-            _ => {}
+        if let Some(input) = self.focused_text_mut() {
+            input.insert(ch);
         }
         self.error = None;
     }
 
     fn pop_char(&mut self) {
-        match self.focus {
-            Field::Slug => {
-                self.slug.pop();
-            }
-            Field::Base => {
-                self.base.pop();
-            }
-            _ => {}
+        if let Some(input) = self.focused_text_mut() {
+            input.backspace();
         }
         self.error = None;
+    }
+
+    fn delete_char(&mut self) {
+        if let Some(input) = self.focused_text_mut() {
+            input.delete();
+        }
+        self.error = None;
+    }
+
+    /// `←`/`→` move the cursor on a typed field and cycle the value on the others.
+    fn move_or_cycle(&mut self, delta: isize) {
+        match self.focused_text_mut() {
+            Some(input) if delta < 0 => input.left(),
+            Some(input) => input.right(),
+            None => self.cycle_focused(delta),
+        }
+    }
+
+    fn handle_control_key(&mut self, code: KeyCode) -> KeyEventResponse {
+        let Some(input) = self.focused_text_mut() else {
+            return KeyEventResponse::Ignored;
+        };
+        match code {
+            KeyCode::Char('a') => input.home(),
+            KeyCode::Char('e') => input.end(),
+            KeyCode::Char('w') => {
+                input.delete_word_back();
+                self.error = None;
+            }
+            _ => return KeyEventResponse::Ignored,
+        }
+        KeyEventResponse::Consumed
     }
 }
 
 impl Component for CreateForm {
     fn render(&mut self, frame: &mut Frame, area: Rect) {
-        let block = Block::bordered().title(" new worktree ");
+        let block = Block::bordered().title(Line::from(vec![
+            Span::from(format!(" {} ", theme::NEW)),
+            Span::styled("new worktree", theme::title()),
+            Span::from(" "),
+        ]));
         let inner = block.inner(area);
         block.render(area, frame.buffer_mut());
 
@@ -185,39 +232,59 @@ impl Component for CreateForm {
         ])
         .areas(inner);
 
-        let marker = |field: Field| if self.focus == field { ">" } else { " " };
+        let marker = |field: Field| {
+            if self.focus == field {
+                theme::FOCUS
+            } else {
+                " "
+            }
+        };
         let prefix_display = if self.prefix_overridden() {
             format!("‹ {} ›  (overridden)", self.prefix())
         } else {
             format!("‹ {} ›", self.prefix())
         };
 
-        let mut lines = vec![
-            format!("{} slug     {}", marker(Field::Slug), self.slug),
-            format!("{} prefix   {}", marker(Field::Prefix), prefix_display),
-            format!("{} base     {}", marker(Field::Base), self.base),
+        let mut rows = vec![
+            (
+                format!("{} slug     ", marker(Field::Slug)),
+                self.slug.value().to_string(),
+            ),
+            (
+                format!("{} prefix   ", marker(Field::Prefix)),
+                prefix_display,
+            ),
+            (
+                format!("{} base     ", marker(Field::Base)),
+                self.base.value().to_string(),
+            ),
         ];
         if self.shows_deps() {
-            lines.push(format!(
-                "{} deps     ‹ {} ›",
-                marker(Field::Deps),
-                self.strategy().label()
+            rows.push((
+                format!("{} deps     ", marker(Field::Deps)),
+                format!("‹ {} ›", self.strategy().label()),
             ));
         }
 
         // Only the typed fields get a cursor; prefix and deps are cycled with ←/→.
-        if matches!(self.focus, Field::Slug | Field::Base)
+        if let Some(cursor) = self.focused_text().map(TextInput::cursor)
             && let Some(row) = self.fields.iter().position(|field| *field == self.focus)
-            && let Some(line) = lines.get(row)
+            && let Some((prefix, _)) = rows.get(row)
         {
-            let x = fields.x.saturating_add(line.chars().count() as u16);
+            let offset = prefix.chars().count().saturating_add(cursor) as u16;
             frame.set_cursor_position((
-                x.min(fields.right().saturating_sub(1)),
+                fields
+                    .x
+                    .saturating_add(offset)
+                    .min(fields.right().saturating_sub(1)),
                 fields.y.saturating_add(row as u16),
             ));
         }
 
-        let lines: Vec<Line> = lines.into_iter().map(Line::from).collect();
+        let lines: Vec<Line> = rows
+            .into_iter()
+            .map(|(prefix, value)| Line::from(format!("{prefix}{value}")))
+            .collect();
         Paragraph::new(lines).render(fields, frame.buffer_mut());
 
         let branch = self.branch().unwrap_or_else(|| String::from("—"));
@@ -230,20 +297,25 @@ impl Component for CreateForm {
         .render(preview, frame.buffer_mut());
 
         if let Some(message) = &self.error {
-            Paragraph::new(Line::from(vec![
-                Span::from("  ! "),
-                Span::from(message.as_str()),
-            ]))
+            Paragraph::new(Line::styled(
+                format!("  {} {message}", theme::WARN),
+                theme::danger(),
+            ))
             .render(error, frame.buffer_mut());
         }
 
-        Paragraph::new(Line::from(" tab/↑↓ field   ←→ cycle   enter create   esc cancel").dim())
-            .render(footer, frame.buffer_mut());
+        Paragraph::new(
+            Line::from(" Field: <tab>/↑↓ | Move: ←→ | Create: <enter> | Cancel: <esc>").dim(),
+        )
+        .render(footer, frame.buffer_mut());
     }
 
     fn handle_event_key(&mut self, key_event: KeyEvent) -> KeyEventResponse {
         if key_event.kind != KeyEventKind::Press {
             return KeyEventResponse::Ignored;
+        }
+        if key_event.modifiers.contains(KeyModifiers::CONTROL) {
+            return self.handle_control_key(key_event.code);
         }
         match key_event.code {
             KeyCode::Tab | KeyCode::Down => {
@@ -255,15 +327,31 @@ impl Component for CreateForm {
                 KeyEventResponse::Consumed
             }
             KeyCode::Right => {
-                self.cycle_focused(1);
+                self.move_or_cycle(1);
                 KeyEventResponse::Consumed
             }
             KeyCode::Left => {
-                self.cycle_focused(-1);
+                self.move_or_cycle(-1);
+                KeyEventResponse::Consumed
+            }
+            KeyCode::Home => {
+                if let Some(input) = self.focused_text_mut() {
+                    input.home();
+                }
+                KeyEventResponse::Consumed
+            }
+            KeyCode::End => {
+                if let Some(input) = self.focused_text_mut() {
+                    input.end();
+                }
                 KeyEventResponse::Consumed
             }
             KeyCode::Backspace => {
                 self.pop_char();
+                KeyEventResponse::Consumed
+            }
+            KeyCode::Delete => {
+                self.delete_char();
                 KeyEventResponse::Consumed
             }
             KeyCode::Char(ch) => {
@@ -507,6 +595,98 @@ mod tests {
         assert!(text.contains("spectra-spe-11667"), "{text}");
         assert!(text.contains("directory already exists"), "{text}");
         assert!(text.contains("npm ci"), "{text}");
+        assert!(text.contains(theme::WARN), "{text}");
+    }
+
+    #[test]
+    fn test_render_marks_the_focused_field_with_an_icon() {
+        let text = dump(&mut form());
+        assert!(text.contains(&format!("{} slug", theme::FOCUS)), "{text}");
+    }
+
+    fn ctrl(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::CONTROL)
+    }
+
+    #[test]
+    fn test_left_moves_the_slug_cursor_instead_of_cycling_the_prefix() {
+        let mut form = form();
+        type_str(&mut form, "abc");
+        form.handle_event_key(key(KeyCode::Left));
+        form.handle_event_key(key(KeyCode::Char('X')));
+        assert_eq!(form.branch().as_deref(), Some("feature/abXc"));
+        assert_eq!(form.prefix(), "feature/");
+    }
+
+    #[test]
+    fn test_a_typed_space_becomes_a_dash_in_the_slug() {
+        let mut form = form();
+        type_str(&mut form, "spe 11667");
+        assert_eq!(form.branch().as_deref(), Some("feature/spe-11667"));
+    }
+
+    #[test]
+    fn test_home_and_end_walk_the_slug_cursor_to_the_edges() {
+        let mut form = form();
+        type_str(&mut form, "bc");
+        form.handle_event_key(key(KeyCode::Home));
+        form.handle_event_key(key(KeyCode::Char('a')));
+        form.handle_event_key(key(KeyCode::End));
+        form.handle_event_key(key(KeyCode::Char('d')));
+        assert_eq!(form.branch().as_deref(), Some("feature/abcd"));
+    }
+
+    #[test]
+    fn test_delete_removes_the_character_under_the_slug_cursor() {
+        let mut form = form();
+        type_str(&mut form, "abc");
+        form.handle_event_key(key(KeyCode::Home));
+        form.handle_event_key(key(KeyCode::Delete));
+        assert_eq!(form.branch().as_deref(), Some("feature/bc"));
+    }
+
+    #[test]
+    fn test_ctrl_w_drops_the_last_slug_segment() {
+        let mut form = form();
+        type_str(&mut form, "spe-11667");
+        form.handle_event_key(ctrl(KeyCode::Char('w')));
+        assert_eq!(form.branch().as_deref(), Some("feature/spe-"));
+    }
+
+    #[test]
+    fn test_ctrl_a_and_ctrl_e_jump_the_slug_cursor() {
+        let mut form = form();
+        type_str(&mut form, "bc");
+        form.handle_event_key(ctrl(KeyCode::Char('a')));
+        form.handle_event_key(key(KeyCode::Char('a')));
+        form.handle_event_key(ctrl(KeyCode::Char('e')));
+        form.handle_event_key(key(KeyCode::Char('d')));
+        assert_eq!(form.branch().as_deref(), Some("feature/abcd"));
+    }
+
+    #[test]
+    fn test_the_base_field_is_editable_too() {
+        let mut form = form();
+        form.handle_event_key(key(KeyCode::Tab));
+        form.handle_event_key(key(KeyCode::Tab));
+        assert_eq!(form.focus(), Field::Base);
+        form.handle_event_key(key(KeyCode::Home));
+        form.handle_event_key(key(KeyCode::Char('x')));
+        assert_eq!(form.base(), "xdevelop");
+    }
+
+    #[test]
+    fn test_the_terminal_cursor_follows_the_slug_cursor_left() {
+        let mut form = form();
+        type_str(&mut form, "spe-11667");
+        form.handle_event_key(key(KeyCode::Left));
+        form.handle_event_key(key(KeyCode::Left));
+        let terminal = render_to_terminal(&mut form);
+        // Two cells back from the end-of-value column asserted above.
+        assert_eq!(
+            terminal.backend().cursor_position(),
+            Position::from((19, 1))
+        );
     }
 
     #[test]
@@ -570,8 +750,8 @@ mod tests {
     #[test]
     fn test_render_footer_shows_both_field_movement_forms() {
         let text = dump(&mut form());
-        assert!(text.contains("tab/↑↓ field"), "{text}");
-        assert!(text.contains("←→ cycle"), "{text}");
+        assert!(text.contains("Field: <tab>/↑↓"), "{text}");
+        assert!(text.contains("Move: ←→"), "{text}");
     }
 
     #[test]

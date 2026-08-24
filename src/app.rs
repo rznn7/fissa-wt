@@ -11,14 +11,16 @@ use crossterm::terminal::{
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 
+use crate::components::confirm_delete::{ConfirmDelete, Entry, Outcome};
 use crate::components::create_form::CreateForm;
 use crate::components::list::{ListComponent, Row};
-use crate::components::progress::ProgressComponent;
+use crate::components::progress::{Completion, Progress, ProgressComponent};
 use crate::components::{Component, KeyEventResponse};
 use crate::create;
 use crate::dirty;
 use crate::git::{self, Repo};
 use crate::node;
+use crate::remove;
 use crate::shell;
 
 pub type Term = Terminal<CrosstermBackend<Stderr>>;
@@ -45,10 +47,7 @@ pub fn build_rows(repo: &Repo) -> Result<Vec<Row>> {
         }
         rows.push(Row {
             label: git::row_label(&entry.path, &repo.main_clone),
-            branch: entry
-                .branch
-                .clone()
-                .unwrap_or_else(|| String::from("(detached)")),
+            branch: entry.branch.clone(),
             dirty: None,
             path: entry.path,
         });
@@ -75,12 +74,13 @@ pub enum ProgressAction {
     Back,
 }
 
-pub fn progress_action(finished: bool, failed: bool, code: KeyCode) -> ProgressAction {
+/// `back_only` covers both a failed run and a run with nothing to cd into.
+pub fn progress_action(finished: bool, back_only: bool, code: KeyCode) -> ProgressAction {
     if !finished {
         return ProgressAction::None;
     }
     match code {
-        KeyCode::Enter if !failed => ProgressAction::Cd,
+        KeyCode::Enter if !back_only => ProgressAction::Cd,
         KeyCode::Enter | KeyCode::Esc => ProgressAction::Back,
         _ => ProgressAction::None,
     }
@@ -98,6 +98,7 @@ fn make_list(repo: &Repo) -> Result<ListComponent> {
 enum Screen {
     List,
     Create,
+    Confirm,
     Progress,
 }
 
@@ -105,8 +106,11 @@ pub struct App {
     repo: Repo,
     list: ListComponent,
     form: Option<CreateForm>,
+    confirm: Option<ConfirmDelete>,
     progress: Option<ProgressComponent>,
-    receiver: Option<Receiver<create::Progress>>,
+    /// A delete has no directory to land in, so `enter` only goes back.
+    progress_is_delete: bool,
+    receiver: Option<Receiver<Progress>>,
     dirty: Option<Receiver<dirty::Report>>,
     screen: Screen,
     created: Option<PathBuf>,
@@ -122,7 +126,9 @@ impl App {
             repo,
             list,
             form: None,
+            confirm: None,
             progress: None,
+            progress_is_delete: false,
             receiver: None,
             dirty,
             screen: Screen::List,
@@ -163,6 +169,11 @@ impl App {
                         form.render(frame, area);
                     }
                 }
+                Screen::Confirm => {
+                    if let Some(confirm) = self.confirm.as_mut() {
+                        confirm.render(frame, area);
+                    }
+                }
                 Screen::Progress => {
                     if let Some(progress) = self.progress.as_mut() {
                         progress.render(frame, area);
@@ -187,6 +198,7 @@ impl App {
                         }
                     }
                     KeyCode::Char('n') => self.open_form(),
+                    KeyCode::Char('d') => self.open_confirm(),
                     _ => {}
                 },
             },
@@ -201,19 +213,34 @@ impl App {
                     }
                 }
             }
+            Screen::Confirm => {
+                let Some(confirm) = self.confirm.as_mut() else {
+                    return Ok(());
+                };
+                confirm.handle_event_key(key_event);
+                match confirm.take_outcome() {
+                    None => {}
+                    Some(Outcome::Cancel) => {
+                        self.confirm = None;
+                        self.screen = Screen::List;
+                    }
+                    Some(Outcome::Delete { force }) => self.submit_delete(force),
+                }
+            }
             Screen::Progress => {
                 let finished = self
                     .progress
                     .as_ref()
                     .map(ProgressComponent::finished)
                     .unwrap_or(false);
-                let failed = self
-                    .progress
-                    .as_ref()
-                    .and_then(ProgressComponent::failure)
-                    .is_some();
+                let back_only = self.progress_is_delete
+                    || self
+                        .progress
+                        .as_ref()
+                        .and_then(ProgressComponent::failure)
+                        .is_some();
 
-                match progress_action(finished, failed, key_event.code) {
+                match progress_action(finished, back_only, key_event.code) {
                     ProgressAction::None => {}
                     ProgressAction::Cd => {
                         self.chosen = self.created.take();
@@ -245,6 +272,65 @@ impl App {
             allowed,
         ));
         self.screen = Screen::Create;
+    }
+
+    /// The main clone can never be removed, so it is dropped from the marks
+    /// rather than offered up for a deletion git would refuse.
+    fn open_confirm(&mut self) {
+        let entries: Vec<Entry> = self
+            .list
+            .marked_rows()
+            .into_iter()
+            .filter(|row| row.path != self.repo.main_clone)
+            .map(|row| Entry {
+                label: row.label.clone(),
+                branch: row.branch.clone(),
+                remote: self.pushed_remote(row.branch.as_deref()),
+                path: row.path.clone(),
+                dirty: row.dirty == Some(true),
+            })
+            .collect();
+
+        if entries.is_empty() {
+            return;
+        }
+        self.confirm = Some(ConfirmDelete::new(entries));
+        self.screen = Screen::Confirm;
+    }
+
+    /// A branch that was never pushed has no remote copy to offer deleting.
+    fn pushed_remote(&self, branch: Option<&str>) -> Option<String> {
+        let branch = branch?;
+        let remote = self.repo.upstream_remote(branch);
+        self.repo
+            .remote_branch_exists(&remote, branch)
+            .then_some(remote)
+    }
+
+    fn submit_delete(&mut self, force: bool) {
+        let Some(confirm) = self.confirm.as_ref() else {
+            return;
+        };
+        let targets = confirm.targets();
+        let scope = remove::Scope {
+            force,
+            ..confirm.scope()
+        };
+        let chains = remove::plan_chains(&targets, scope);
+        let labels = remove::labels(&chains);
+        let title = match targets.len() {
+            1 => format!("deleting {}", targets[0].label),
+            count => format!("deleting {count} worktrees"),
+        };
+
+        let (sender, receiver) = mpsc::channel();
+        remove::spawn(self.repo.main_clone.clone(), chains, sender);
+
+        self.progress = Some(ProgressComponent::new(title, labels, Completion::ListOnly));
+        self.progress_is_delete = true;
+        self.receiver = Some(receiver);
+        self.confirm = None;
+        self.screen = Screen::Progress;
     }
 
     fn submit_form(&mut self) -> Result<()> {
@@ -284,8 +370,11 @@ impl App {
         self.progress = Some(ProgressComponent::new(
             format!("creating {dir}"),
             labels,
-            shell::wrapper_active(),
+            Completion::CdOrList {
+                shell_init: shell::wrapper_active(),
+            },
         ));
+        self.progress_is_delete = false;
         self.receiver = Some(receiver);
         self.created = Some(dest);
         self.form = None;
@@ -326,6 +415,7 @@ impl App {
         self.created = None;
         self.receiver = None;
         self.progress = None;
+        self.progress_is_delete = false;
         self.list = make_list(&self.repo)?;
         self.dirty = Some(dirty::spawn(self.list.paths()));
         self.screen = Screen::List;
@@ -449,6 +539,194 @@ mod tests {
         press(&mut app, KeyCode::Enter);
         assert!(!app.quit);
         assert_eq!(app.chosen, None);
+    }
+
+    fn shift_press(app: &mut App, code: KeyCode) {
+        app.on_key(crossterm::event::KeyEvent::new(
+            code,
+            crossterm::event::KeyModifiers::SHIFT,
+        ))
+        .unwrap();
+    }
+
+    /// Runs the deletion thread to completion the way `run` would.
+    fn pump(app: &mut App) {
+        for _ in 0..2000 {
+            app.drain_progress();
+            if app
+                .progress
+                .as_ref()
+                .map(ProgressComponent::finished)
+                .unwrap_or(false)
+            {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        panic!("the deletion never finished");
+    }
+
+    #[test]
+    fn test_d_opens_the_confirmation_for_the_marked_rows() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut app = app_on_the_list_screen(&tmp);
+        press(&mut app, KeyCode::Char('j'));
+        press(&mut app, KeyCode::Char('d'));
+        assert!(matches!(app.screen, Screen::Confirm));
+        let targets = app.confirm.as_ref().unwrap().targets();
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].label, "side");
+    }
+
+    #[test]
+    fn test_d_leaves_the_main_worktree_out_of_the_confirmation() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut app = app_on_the_list_screen(&tmp);
+        shift_press(&mut app, KeyCode::Down);
+        press(&mut app, KeyCode::Char('d'));
+        let targets = app.confirm.as_ref().unwrap().targets();
+        assert_eq!(targets.len(), 1, "the main clone cannot be removed");
+        assert_eq!(targets[0].label, "side");
+    }
+
+    #[test]
+    fn test_d_on_the_main_worktree_alone_does_nothing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut app = app_on_the_list_screen(&tmp);
+        press(&mut app, KeyCode::Char('d'));
+        assert!(matches!(app.screen, Screen::List));
+    }
+
+    #[test]
+    fn test_esc_on_the_confirmation_returns_to_the_list() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut app = app_on_the_list_screen(&tmp);
+        press(&mut app, KeyCode::Char('j'));
+        press(&mut app, KeyCode::Char('d'));
+        press(&mut app, KeyCode::Esc);
+        assert!(matches!(app.screen, Screen::List));
+        assert!(app.confirm.is_none());
+    }
+
+    #[test]
+    fn test_confirming_removes_the_worktree_and_drops_it_from_the_list() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut app = app_on_the_list_screen(&tmp);
+        let side = tmp.path().join("side");
+        press(&mut app, KeyCode::Char('j'));
+        press(&mut app, KeyCode::Char('d'));
+        press(&mut app, KeyCode::Enter);
+        pump(&mut app);
+        assert!(!side.exists(), "the worktree should be gone");
+
+        press(&mut app, KeyCode::Enter);
+        assert!(matches!(app.screen, Screen::List));
+        assert!(!app.quit, "enter after a delete has nowhere to cd");
+        assert_eq!(app.list.marked_rows().len(), 1);
+    }
+
+    /// The same repo, but `side` has been pushed to a bare remote called `gitlab`.
+    fn app_with_a_pushed_side_branch(tmp: &tempfile::TempDir) -> App {
+        let remote = tmp.path().join("remote.git");
+        let root = tmp.path().join("main");
+        std::fs::create_dir_all(&root).unwrap();
+        run(
+            tmp.path(),
+            &["init", "-q", "--bare", remote.to_str().unwrap()],
+        );
+        let repo = repo_with_a_second_worktree(&root);
+        run(
+            &root,
+            &["remote", "add", "gitlab", remote.to_str().unwrap()],
+        );
+        run(&root, &["push", "-q", "-u", "gitlab", "main", "side"]);
+        App::new(Repo::discover(&root).unwrap()).unwrap()
+    }
+
+    fn remote_heads(tmp: &tempfile::TempDir) -> String {
+        let out = std::process::Command::new("git")
+            .args(["ls-remote", "--heads", "gitlab"])
+            .current_dir(tmp.path().join("main"))
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout).to_string()
+    }
+
+    #[test]
+    fn test_the_remote_toggle_deletes_the_branch_on_the_remote() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut app = app_with_a_pushed_side_branch(&tmp);
+        press(&mut app, KeyCode::Char('j'));
+        press(&mut app, KeyCode::Char('d'));
+        press(&mut app, KeyCode::Char('r'));
+        press(&mut app, KeyCode::Enter);
+        pump(&mut app);
+
+        assert!(app.progress.as_ref().unwrap().failure().is_none());
+        let heads = remote_heads(&tmp);
+        assert!(!heads.contains("refs/heads/side"), "{heads}");
+        assert!(heads.contains("refs/heads/main"), "{heads}");
+    }
+
+    #[test]
+    fn test_the_remote_survives_a_delete_that_did_not_ask_for_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut app = app_with_a_pushed_side_branch(&tmp);
+        press(&mut app, KeyCode::Char('j'));
+        press(&mut app, KeyCode::Char('d'));
+        press(&mut app, KeyCode::Char(' '));
+        press(&mut app, KeyCode::Enter);
+        pump(&mut app);
+
+        assert!(remote_heads(&tmp).contains("refs/heads/side"));
+    }
+
+    #[test]
+    fn test_a_branch_that_was_never_pushed_has_no_remote_to_offer() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut app = app_on_the_list_screen(&tmp);
+        press(&mut app, KeyCode::Char('j'));
+        press(&mut app, KeyCode::Char('d'));
+        assert_eq!(app.confirm.as_ref().unwrap().targets()[0].remote, None);
+    }
+
+    #[test]
+    fn test_confirming_with_the_branch_toggle_deletes_the_branch_too() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut app = app_on_the_list_screen(&tmp);
+        press(&mut app, KeyCode::Char('j'));
+        press(&mut app, KeyCode::Char('d'));
+        press(&mut app, KeyCode::Char(' '));
+        press(&mut app, KeyCode::Enter);
+        pump(&mut app);
+        assert!(!app.repo.branch_exists("side"));
+    }
+
+    #[test]
+    fn test_a_plain_delete_refuses_a_dirty_worktree() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut app = app_on_the_list_screen(&tmp);
+        let side = tmp.path().join("side");
+        std::fs::write(side.join("scratch.txt"), "untracked").unwrap();
+        press(&mut app, KeyCode::Char('j'));
+        press(&mut app, KeyCode::Char('d'));
+        press(&mut app, KeyCode::Enter);
+        pump(&mut app);
+        assert!(side.exists(), "uncommitted work must survive");
+        assert!(app.progress.as_ref().unwrap().failure().is_some());
+    }
+
+    #[test]
+    fn test_f_forces_a_dirty_worktree_away() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut app = app_on_the_list_screen(&tmp);
+        let side = tmp.path().join("side");
+        std::fs::write(side.join("scratch.txt"), "untracked").unwrap();
+        press(&mut app, KeyCode::Char('j'));
+        press(&mut app, KeyCode::Char('d'));
+        press(&mut app, KeyCode::Char('f'));
+        pump(&mut app);
+        assert!(!side.exists());
     }
 
     #[test]

@@ -15,6 +15,8 @@ lightly where it is not.
 | **Render smoke** | no panic; key substrings present; column alignment | `TestBackend`, scan the buffer | a few per component |
 | **Shell function** | exit status, resulting `pwd`, passed-through stdout | source `SHELL_FUNCTION` into real `bash`, run against a stub binary on `PATH` | Yes |
 | **Join point** | `build_rows` over a real temp git repo | `git init` in a `tempfile` dir | two tests |
+| **Concurrency** | chains overlap; a chain stops at its first failure | inject a runner into `run_chains`, count peak concurrency | Yes |
+| **Remotes** | default remote choice, upstream resolution, remote branch deletion | push to a bare repo in a `tempfile` dir | Yes |
 | **`npm ci`, real 1 GB repos, real terminals** | — | not tested | No |
 
 No golden snapshots, no `insta`, no `mockall`. Std `assert_eq!` plus ratatui's
@@ -60,6 +62,9 @@ Run before a release:
 4. `q` and a panic both leave the terminal usable (`stty -a` shows `icanon`).
 5. The footer shows the shell-init hint when `FISSA_SHELL_INIT` is unset.
 6. On a repo with no `package.json`, the form's `deps` row is absent.
+7. Deleting the worktree you launched `fissa` from succeeds and lands back on the list.
+8. `r` on a pushed branch really removes it from the remote; the row shows no `r` hint
+   for a branch that was never pushed.
 
 `cargo build` does not update an installed binary — re-run `cargo install --path .`
 before any manual check, or you will be testing the previous version.

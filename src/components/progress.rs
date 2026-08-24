@@ -1,13 +1,28 @@
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
-use ratatui::style::Stylize;
-use ratatui::text::Line;
+use ratatui::style::{Style, Stylize};
+use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Paragraph, Widget};
 
+use crate::components::theme;
 use crate::components::{Component, KeyEventResponse, fit_tail};
-use crate::create::Progress;
 
-const SPINNER: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+/// What a producer of steps reports back to the screen.
+pub enum Progress {
+    Running(usize),
+    Ok(usize, String),
+    Failed(usize, String),
+    Finished,
+}
+
+/// What the screen offers once every step has settled.
+#[derive(Clone, Copy)]
+pub enum Completion {
+    /// A run that leaves a directory worth landing in.
+    CdOrList { shell_init: bool },
+    /// A run with nowhere to go but back.
+    ListOnly,
+}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum StepState {
@@ -24,12 +39,12 @@ pub struct ProgressComponent {
     details: Vec<String>,
     finished: bool,
     failure: Option<String>,
-    shell_init: bool,
+    completion: Completion,
     frame: usize,
 }
 
 impl ProgressComponent {
-    pub fn new(title: String, labels: Vec<String>, shell_init: bool) -> Self {
+    pub fn new(title: String, labels: Vec<String>, completion: Completion) -> Self {
         let count = labels.len();
         Self {
             title,
@@ -38,7 +53,7 @@ impl ProgressComponent {
             details: vec![String::new(); count],
             finished: false,
             failure: None,
-            shell_init,
+            completion,
             frame: 0,
         }
     }
@@ -48,11 +63,14 @@ impl ProgressComponent {
     }
 
     fn hints(&self) -> &'static str {
-        match (self.finished, self.failure.is_some(), self.shell_init) {
-            (false, _, _) => "",
-            (true, true, _) => " enter list",
-            (true, false, true) => " enter cd    esc list",
-            (true, false, false) => " enter … (needs shell init)    esc list",
+        if !self.finished {
+            return "";
+        }
+        match self.completion {
+            _ if self.failure.is_some() => " List: <enter>",
+            Completion::ListOnly => " List: <enter>",
+            Completion::CdOrList { shell_init: true } => " Cd: <enter> | List: <esc>",
+            Completion::CdOrList { shell_init: false } => " Cd: … (needs shell init) | List: <esc>",
         }
     }
 
@@ -96,7 +114,11 @@ impl Component for ProgressComponent {
         let [body, footer] =
             Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(area);
 
-        let block = Block::bordered().title(format!(" {} ", self.title));
+        let block = Block::bordered().title(Line::from(vec![
+            Span::from(" "),
+            Span::styled(self.title.as_str(), theme::title()),
+            Span::from(" "),
+        ]));
         let inner = block.inner(body);
         block.render(body, frame.buffer_mut());
 
@@ -114,17 +136,21 @@ impl Component for ProgressComponent {
             .iter()
             .enumerate()
             .map(|(index, label)| {
-                let marker = match self.states.get(index) {
-                    Some(StepState::Done) => '✓',
-                    Some(StepState::Failed) => '✗',
-                    Some(StepState::Running) => SPINNER[self.frame % SPINNER.len()],
-                    _ => ' ',
+                let spinner = theme::SPINNER[self.frame % theme::SPINNER.len()];
+                let (marker, style) = match self.states.get(index) {
+                    Some(StepState::Done) => (String::from(theme::DONE), theme::ok()),
+                    Some(StepState::Failed) => (String::from(theme::FAILED), theme::danger()),
+                    Some(StepState::Running) => (spinner.to_string(), theme::accent()),
+                    _ => (String::from(" "), Style::new()),
                 };
                 let detail = self.details.get(index).map(String::as_str).unwrap_or("");
-                Line::from(format!(
-                    "{marker} {:<label_width$} {detail}",
-                    fit_tail(label, label_width)
-                ))
+                Line::from(vec![
+                    Span::styled(format!("{marker} "), style),
+                    Span::from(format!(
+                        "{:<label_width$} {detail}",
+                        fit_tail(label, label_width)
+                    )),
+                ])
             })
             .collect();
 
@@ -149,13 +175,14 @@ mod tests {
     }
 
     fn component_with_shell_init(shell_init: bool) -> ProgressComponent {
+        let completion = Completion::CdOrList { shell_init };
         ProgressComponent::new(
             String::from("creating spectra-spe-11667"),
             vec![
                 String::from("git worktree add  feature/spe-11667"),
                 String::from("npm ci  app"),
             ],
-            shell_init,
+            completion,
         )
     }
 
@@ -224,7 +251,7 @@ mod tests {
         let mut component = component();
         component.apply(Progress::Running(1));
         let first = marker(&mut component, 1);
-        for _ in 0..SPINNER.len() {
+        for _ in 0..theme::SPINNER.len() {
             component.tick();
         }
         assert_eq!(marker(&mut component, 1), first);
@@ -235,7 +262,7 @@ mod tests {
         let mut component = component();
         component.apply(Progress::Ok(1, String::from("installed")));
         component.tick();
-        assert_eq!(marker(&mut component, 1), "✓");
+        assert_eq!(marker(&mut component, 1), theme::DONE);
     }
 
     #[test]
@@ -247,7 +274,7 @@ mod tests {
         assert!(text.contains("feature/spe-11667"), "{text}");
         assert!(text.contains("created"), "{text}");
         assert!(text.contains("npm ci  app"), "{text}");
-        assert!(text.contains('✓'), "{text}");
+        assert!(text.contains(theme::DONE), "{text}");
     }
 
     #[test]
@@ -258,7 +285,7 @@ mod tests {
                 String::from("git worktree add  feature/fissa-smoke-test"),
                 String::from("npm ci  app"),
             ],
-            true,
+            Completion::CdOrList { shell_init: true },
         );
         component.apply(Progress::Ok(0, String::from("DETAIL-A")));
         component.apply(Progress::Ok(1, String::from("DETAIL-B")));
@@ -305,8 +332,8 @@ mod tests {
         let mut component = component();
         component.apply(Progress::Finished);
         let text = dump(&mut component);
-        assert!(text.contains("enter cd"), "{text}");
-        assert!(text.contains("esc list"), "{text}");
+        assert!(text.contains("Cd: <enter>"), "{text}");
+        assert!(text.contains("List: <esc>"), "{text}");
     }
 
     #[test]
@@ -315,7 +342,20 @@ mod tests {
         component.apply(Progress::Finished);
         let text = dump(&mut component);
         assert!(text.contains("needs shell init"), "{text}");
-        assert!(!text.contains("enter cd"), "{text}");
+        assert!(!text.contains("Cd: <enter>"), "{text}");
+    }
+
+    #[test]
+    fn test_render_offers_only_the_list_when_there_is_nothing_to_cd_into() {
+        let mut component = ProgressComponent::new(
+            String::from("deleting 2 worktrees"),
+            vec![String::from("git worktree remove  side")],
+            Completion::ListOnly,
+        );
+        component.apply(Progress::Finished);
+        let text = dump(&mut component);
+        assert!(text.contains("List: <enter>"), "{text}");
+        assert!(!text.contains("Cd: <enter>"), "{text}");
     }
 
     #[test]
@@ -324,8 +364,8 @@ mod tests {
         component.apply(Progress::Failed(0, String::from("branch exists")));
         component.apply(Progress::Finished);
         let text = dump(&mut component);
-        assert!(text.contains("enter list"), "{text}");
-        assert!(!text.contains("enter cd"), "{text}");
+        assert!(text.contains("List: <enter>"), "{text}");
+        assert!(!text.contains("Cd: <enter>"), "{text}");
     }
 
     #[test]
@@ -334,6 +374,6 @@ mod tests {
         component.apply(Progress::Failed(0, String::from("branch exists")));
         let text = dump(&mut component);
         assert!(text.contains("branch exists"), "{text}");
-        assert!(text.contains('✗'), "{text}");
+        assert!(text.contains(theme::FAILED), "{text}");
     }
 }

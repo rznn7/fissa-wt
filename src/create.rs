@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::Sender;
 
+use crate::components::progress::Progress;
 use crate::node::{self, Strategy, Target};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -13,13 +14,6 @@ pub enum Action {
 pub struct Step {
     pub label: String,
     pub action: Action,
-}
-
-pub enum Progress {
-    Running(usize),
-    Ok(usize, String),
-    Failed(usize, String),
-    Finished,
 }
 
 pub struct Request {

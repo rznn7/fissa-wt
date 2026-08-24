@@ -31,8 +31,9 @@ interchangeably on every screen.
 
 | Screen | Keys |
 |---|---|
-| list | `↑`/`↓` or `j`/`k` move, `/` search, `n` new worktree, `enter` cd, `q` quit |
+| list | `↑`/`↓` or `j`/`k` move, `shift+↑`/`shift+↓` extend the selection, `/` search, `n` new worktree, `d` delete, `enter` cd, `q` quit |
 | create | `tab` or `↑`/`↓` next field, `←`/`→` cycle value, `enter` create, `esc` cancel |
+| delete | `space` delete the branch too, `r` delete the remote branch too, `enter` delete, `f` force, `esc` cancel |
 | progress | when finished: `enter` cd into the new worktree, `esc` back to the list |
 
 `/` opens a search bar and the list narrows as you type, matching either the directory or
@@ -40,12 +41,40 @@ the branch, case-insensitively. `enter` keeps the filter and puts the cursor on 
 match, so `↑`/`↓` then walks only those rows; `esc` backs out of the bar without applying
 anything. A filter stays visible in the title until `esc` clears it — `q` quits regardless.
 
+The base ref and the branch prefixes offered by the create form come from the repo's
+default remote — `origin` when it exists, otherwise the only remote, otherwise the first
+by name.
+
 Creating `spe-11667` with prefix `feature/` in a repo cloned at `~/work/spectra` gives
 branch `feature/spe-11667` in `~/work/spectra-spe-11667`. Type a `/` in the slug and it
 becomes the branch name verbatim.
 
 The form previews the branch and directory live, and refuses to create anything if the
 directory exists, the branch is taken, or the base ref is unknown.
+
+## Delete
+
+`shift+↑`/`shift+↓` extends the cursor into a range, the whole range shown inverted, and
+`d` opens a confirmation listing what is about to go. The main clone is never in that
+list — git cannot remove it.
+
+`enter` runs `git worktree remove` per worktree, which refuses any worktree holding
+uncommitted changes; those are marked `●` in the confirmation and reported as failed
+steps, while their clean neighbours in the same selection still go. `f` runs the same
+deletions with `--force` and does destroy uncommitted work.
+
+`space` adds a `git branch -d` per worktree, off by default. It refuses to delete an
+unmerged branch unless you deleted with `f`, which uses `-D`.
+
+`r` adds a `git push --delete`, also off by default and independent of `space` — you can
+drop the remote branch and keep the local one, or the reverse. It only appears for
+branches that actually have a remote-tracking ref, and it follows each branch's own
+upstream (`branch.<name>.remote`) rather than assuming `origin`. This is the one thing
+`fissa` does that everyone else on the repo sees.
+
+Each worktree is deleted independently and in parallel, so one that refuses to go never
+holds up the others. Within a worktree the steps are a chain: if the removal fails the
+branch is left alone, and if the branch deletion fails the remote copy is left alone.
 
 ## npm
 

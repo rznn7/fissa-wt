@@ -1,20 +1,29 @@
 use std::path::{Path, PathBuf};
 
-use crossterm::event::{KeyCode, KeyEvent, KeyEventKind};
+use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
-use ratatui::style::Stylize;
+use ratatui::style::{Style, Stylize};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, List, ListItem, ListState, Paragraph, StatefulWidget, Widget};
 
+use crate::components::text_input::TextInput;
+use crate::components::theme;
 use crate::components::{Component, KeyEventResponse, fit_tail};
 
 pub struct Row {
     pub label: String,
-    pub branch: String,
+    /// `None` for a detached worktree.
+    pub branch: Option<String>,
     /// `None` until the background scan reports on this worktree.
     pub dirty: Option<bool>,
     pub path: PathBuf,
+}
+
+impl Row {
+    pub fn branch_or_detached(&self) -> &str {
+        self.branch.as_deref().unwrap_or("(detached)")
+    }
 }
 
 pub struct ListComponent {
@@ -25,8 +34,10 @@ pub struct ListComponent {
     /// The query `enter` committed.
     query: String,
     /// The live query while the search bar is open; `esc` drops it back to `query`.
-    editing: Option<String>,
+    editing: Option<TextInput>,
     state: ListState,
+    /// Where a shift-extended range started, as an index into `visible`.
+    anchor: Option<usize>,
     shell_init: bool,
 }
 
@@ -39,6 +50,7 @@ impl ListComponent {
             query: String::new(),
             editing: None,
             state: ListState::default(),
+            anchor: None,
             shell_init,
         };
         component.refilter();
@@ -60,8 +72,27 @@ impl ListComponent {
         self.rows.get(row).map(|row| row.path.clone())
     }
 
+    /// The rows a delete would act on: the whole open range, or the cursor row.
+    pub fn marked_rows(&self) -> Vec<&Row> {
+        self.marked_slots()
+            .filter_map(|slot| self.visible.get(slot))
+            .filter_map(|index| self.rows.get(*index))
+            .collect()
+    }
+
+    fn marked_slots(&self) -> std::ops::Range<usize> {
+        let Some(cursor) = self.state.selected() else {
+            return 0..0;
+        };
+        let anchor = self.anchor.unwrap_or(cursor);
+        anchor.min(cursor)..anchor.max(cursor) + 1
+    }
+
     fn filter(&self) -> &str {
-        self.editing.as_deref().unwrap_or(&self.query)
+        self.editing
+            .as_ref()
+            .map(TextInput::value)
+            .unwrap_or(&self.query)
     }
 
     fn refilter(&mut self) {
@@ -73,56 +104,86 @@ impl ListComponent {
             .filter(|(_, row)| {
                 needle.is_empty()
                     || row.label.to_lowercase().contains(&needle)
-                    || row.branch.to_lowercase().contains(&needle)
+                    || row.branch_or_detached().to_lowercase().contains(&needle)
             })
             .map(|(index, _)| index)
             .collect();
         self.state.select((!self.visible.is_empty()).then_some(0));
+        self.anchor = None;
     }
 
     fn search_bar(&self) -> Option<String> {
-        self.editing.as_deref().map(|buffer| format!(" /{buffer}"))
+        self.editing
+            .as_ref()
+            .map(|input| format!(" {} {}", theme::SEARCH, input.value()))
+    }
+
+    /// Where the caret sits in the search bar, as a column offset from the footer.
+    fn search_cursor_offset(&self) -> Option<usize> {
+        let input = self.editing.as_ref()?;
+        let prefix = format!(" {} ", theme::SEARCH).chars().count();
+        Some(prefix + input.cursor())
     }
 
     fn footer_line(&self) -> Line<'_> {
         if let Some(bar) = self.search_bar() {
             return Line::from(vec![
                 Span::from(bar),
-                Span::from("    enter select    esc cancel").dim(),
+                Span::from("    Select: <enter> | Cancel: <esc>").dim(),
             ]);
         }
         let cd_hint = if self.shell_init {
-            "enter cd"
+            "Cd: <enter>"
         } else {
-            "enter … (needs shell init)"
+            "Cd: … (needs shell init)"
         };
-        let clear_hint = if self.query.is_empty() {
-            "/ search"
+        let filter_hint = if self.query.is_empty() {
+            "Search: /"
         } else {
-            "esc clear"
+            "Clear: <esc>"
         };
         Line::from(format!(
-            " ↑↓/jk move    n new    {cd_hint}    {clear_hint}    q quit"
+            " Move: ↑↓/jk | New: n | {cd_hint} | Delete: d | {filter_hint} | Quit: q"
         ))
         .dim()
     }
 
     /// Swallows every key so list and app shortcuts cannot fire mid-query.
     fn handle_search_key(&mut self, key_event: KeyEvent) -> KeyEventResponse {
-        let Some(buffer) = self.editing.as_mut() else {
+        let Some(input) = self.editing.as_mut() else {
             return KeyEventResponse::Ignored;
         };
+        let control = key_event.modifiers.contains(KeyModifiers::CONTROL);
         match key_event.code {
+            KeyCode::Char('a') if control => input.home(),
+            KeyCode::Char('e') if control => input.end(),
+            KeyCode::Char('w') if control => {
+                input.delete_word_back();
+                self.refilter();
+            }
+            KeyCode::Char(_) if control => {}
             KeyCode::Char(character) => {
-                buffer.push(character);
+                input.insert(character);
                 self.refilter();
             }
             KeyCode::Backspace => {
-                buffer.pop();
+                input.backspace();
                 self.refilter();
             }
+            KeyCode::Delete => {
+                input.delete();
+                self.refilter();
+            }
+            KeyCode::Left => input.left(),
+            KeyCode::Right => input.right(),
+            KeyCode::Home => input.home(),
+            KeyCode::End => input.end(),
             KeyCode::Enter => {
-                self.query = self.editing.take().unwrap_or_default();
+                self.query = self
+                    .editing
+                    .take()
+                    .map(|input| input.value().to_string())
+                    .unwrap_or_default();
                 self.refilter();
             }
             KeyCode::Esc => {
@@ -134,15 +195,24 @@ impl ListComponent {
         KeyEventResponse::Consumed
     }
 
-    fn move_selection(&mut self, delta: isize) {
+    fn move_selection(&mut self, delta: isize, extend: bool) {
         if self.visible.is_empty() {
             return;
+        }
+        if extend {
+            self.anchor = self.anchor.or(self.state.selected());
+        } else {
+            self.anchor = None;
         }
         let last = self.visible.len().saturating_sub(1);
         let current = self.state.selected().unwrap_or(0) as isize;
         let next = (current + delta).clamp(0, last as isize) as usize;
         self.state.select(Some(next));
     }
+}
+
+fn extends_range(key_event: KeyEvent) -> bool {
+    key_event.modifiers.contains(KeyModifiers::SHIFT)
 }
 
 impl Component for ListComponent {
@@ -158,47 +228,77 @@ impl Component for ListComponent {
             .max()
             .unwrap_or(0)
             .clamp(12, 40);
-        let branch_width = inner.saturating_sub(2 + label_width + 1 + 2).max(8);
+        let gutters = 2 + 2 + 1 + 2 + 2;
+        let branch_width = inner.saturating_sub(gutters + label_width).max(8);
 
+        // An open search bar owns the focus, so the list drops its selection feedback.
+        let focused = self.editing.is_none();
+        let marked = if focused { self.marked_slots() } else { 0..0 };
         let items: Vec<ListItem> = self
             .visible
             .iter()
-            .filter_map(|index| self.rows.get(*index))
-            .map(|row| {
-                let dirty = if row.dirty == Some(true) { "●" } else { " " };
+            .enumerate()
+            .filter_map(|(slot, index)| Some((slot, self.rows.get(*index)?)))
+            .map(|(slot, row)| {
                 let nested = row.label.contains('/');
+                let icon = Span::from(format!("{} ", theme::WORKTREE));
+                let icon = if nested { icon.dim() } else { icon };
                 let label = Span::from(format!(
                     "{:<label_width$} ",
                     fit_tail(&row.label, label_width)
                 ));
                 let label = if nested { label.dim() } else { label };
                 let spans = vec![
+                    icon,
                     label,
+                    Span::from(format!("{} ", theme::BRANCH)).dim(),
                     Span::from(format!(
                         "{:<branch_width$}",
-                        fit_tail(&row.branch, branch_width)
+                        fit_tail(row.branch_or_detached(), branch_width)
                     )),
-                    Span::from(format!("{dirty} ")),
+                    if row.dirty == Some(true) {
+                        Span::styled(format!("{} ", theme::DIRTY), theme::dirty())
+                    } else {
+                        Span::from("  ")
+                    },
                 ];
-                ListItem::new(Line::from(spans))
+                let item = ListItem::new(Line::from(spans));
+                if marked.contains(&slot) {
+                    item.style(theme::selection())
+                } else {
+                    item
+                }
             })
             .collect();
 
-        let title = if self.editing.is_none() && !self.query.is_empty() {
-            format!(" {}  /{} ", self.repo_name, self.query)
-        } else {
-            format!(" {} ", self.repo_name)
-        };
+        let mut title = vec![
+            Span::from(" "),
+            Span::styled(self.repo_name.as_str(), theme::title()),
+        ];
+        if self.editing.is_none() && !self.query.is_empty() {
+            title.push(Span::styled(
+                format!("  {} {}", theme::SEARCH, self.query),
+                theme::accent(),
+            ));
+        }
+        title.push(Span::from(" "));
+
         let list = List::new(items)
-            .block(Block::bordered().title(title))
-            .highlight_symbol("> ");
+            .block(Block::bordered().title(Line::from(title)))
+            // The symbol stays either way so the columns do not shift when the bar opens.
+            .highlight_symbol("  ")
+            .highlight_style(if focused {
+                theme::selection()
+            } else {
+                Style::new()
+            });
         StatefulWidget::render(list, body, frame.buffer_mut(), &mut self.state);
 
         Paragraph::new(self.footer_line()).render(footer, frame.buffer_mut());
 
         // Only the open search bar asks for a cursor; unset elsewhere is what hides it.
-        if let Some(bar) = self.search_bar() {
-            let x = footer.x.saturating_add(bar.chars().count() as u16);
+        if let Some(offset) = self.search_cursor_offset() {
+            let x = footer.x.saturating_add(offset as u16);
             frame.set_cursor_position((x.min(footer.right().saturating_sub(1)), footer.y));
         }
     }
@@ -212,7 +312,11 @@ impl Component for ListComponent {
         }
         match key_event.code {
             KeyCode::Char('/') => {
-                self.editing = Some(self.query.clone());
+                self.editing = Some(TextInput::new(self.query.clone()));
+                KeyEventResponse::Consumed
+            }
+            KeyCode::Esc if self.anchor.is_some() => {
+                self.anchor = None;
                 KeyEventResponse::Consumed
             }
             // A committed filter absorbs esc; an unfiltered list lets it through to quit.
@@ -221,12 +325,20 @@ impl Component for ListComponent {
                 self.refilter();
                 KeyEventResponse::Consumed
             }
+            KeyCode::Char('J') | KeyCode::Down if extends_range(key_event) => {
+                self.move_selection(1, true);
+                KeyEventResponse::Consumed
+            }
+            KeyCode::Char('K') | KeyCode::Up if extends_range(key_event) => {
+                self.move_selection(-1, true);
+                KeyEventResponse::Consumed
+            }
             KeyCode::Char('j') | KeyCode::Down => {
-                self.move_selection(1);
+                self.move_selection(1, false);
                 KeyEventResponse::Consumed
             }
             KeyCode::Char('k') | KeyCode::Up => {
-                self.move_selection(-1);
+                self.move_selection(-1, false);
                 KeyEventResponse::Consumed
             }
             _ => KeyEventResponse::Ignored,
@@ -246,13 +358,13 @@ mod tests {
         vec![
             Row {
                 label: String::from("spectra"),
-                branch: String::from("develop"),
+                branch: Some(String::from("develop")),
                 dirty: Some(false),
                 path: PathBuf::from("/w/spectra"),
             },
             Row {
                 label: String::from("spectra-ter"),
-                branch: String::from("ter"),
+                branch: Some(String::from("ter")),
                 dirty: Some(true),
                 path: PathBuf::from("/w/spectra-ter"),
             },
@@ -278,8 +390,10 @@ mod tests {
         }
     }
 
+    const TERMINAL_WIDTH: u16 = 80;
+
     fn render_to_terminal(component: &mut ListComponent) -> Terminal<TestBackend> {
-        let mut terminal = Terminal::new(TestBackend::new(70, 8)).unwrap();
+        let mut terminal = Terminal::new(TestBackend::new(TERMINAL_WIDTH, 8)).unwrap();
         terminal
             .draw(|frame| component.render(frame, frame.area()))
             .unwrap();
@@ -336,7 +450,7 @@ mod tests {
     #[test]
     fn test_render_footer_shows_both_movement_forms() {
         let text = dump(&mut component(true));
-        assert!(text.contains("↑↓/jk move"), "{text}");
+        assert!(text.contains("Move: ↑↓/jk"), "{text}");
     }
 
     #[test]
@@ -391,7 +505,7 @@ mod tests {
         assert!(text.contains("spectra"), "{text}");
         assert!(text.contains("develop"), "{text}");
         assert!(text.contains('●'), "{text}");
-        assert!(text.contains("enter cd"), "{text}");
+        assert!(text.contains("Cd: <enter>"), "{text}");
     }
 
     #[test]
@@ -400,7 +514,7 @@ mod tests {
             String::from("spectra"),
             vec![Row {
                 label: String::from("spectra"),
-                branch: String::from("develop"),
+                branch: Some(String::from("develop")),
                 dirty: None,
                 path: PathBuf::from("/w/spectra"),
             }],
@@ -415,7 +529,7 @@ mod tests {
             String::from("spectra"),
             vec![Row {
                 label: String::from("spectra"),
-                branch: String::from("develop"),
+                branch: Some(String::from("develop")),
                 dirty: None,
                 path: PathBuf::from("/w/spectra"),
             }],
@@ -438,6 +552,21 @@ mod tests {
         let mut component = unscanned_component();
         component.set_dirty(Path::new("/w/nowhere"), true);
         assert!(component.rows.iter().all(|row| row.dirty.is_none()));
+    }
+
+    #[test]
+    fn test_render_calls_a_branchless_worktree_detached() {
+        let mut component = ListComponent::new(
+            String::from("spectra"),
+            vec![Row {
+                label: String::from("spectra"),
+                branch: None,
+                dirty: None,
+                path: PathBuf::from("/w/spectra"),
+            }],
+            true,
+        );
+        assert!(dump(&mut component).contains("(detached)"));
     }
 
     #[test]
@@ -477,20 +606,20 @@ mod tests {
         let long_rows = vec![
             Row {
                 label: String::from(".claude/worktrees/input-button-counter"),
-                branch: String::from("BRANCH-A"),
+                branch: Some(String::from("BRANCH-A")),
                 dirty: None,
                 path: PathBuf::from("/w/a"),
             },
             Row {
                 label: String::from(".claude/worktrees/input-collapsible-container"),
-                branch: String::from("BRANCH-B"),
+                branch: Some(String::from("BRANCH-B")),
                 dirty: None,
                 path: PathBuf::from("/w/b"),
             },
         ];
         let mut component = ListComponent::new(String::from("r"), long_rows, true);
         let text = dump(&mut component);
-        let lines = screen_lines(&text, 70);
+        let lines = screen_lines(&text, TERMINAL_WIDTH as usize);
 
         let column_of = |line: &str, needle: &str| -> Option<usize> {
             let byte = line.find(needle)?;
@@ -663,9 +792,9 @@ mod tests {
         let mut component = component(true);
         search(&mut component, "ter");
         let text = dump(&mut component);
-        assert!(text.contains("/ter"), "{text}");
-        assert!(text.contains("esc cancel"), "{text}");
-        assert!(!text.contains("q quit"), "{text}");
+        assert!(text.contains(&format!("{} ter", theme::SEARCH)), "{text}");
+        assert!(text.contains("Cancel: <esc>"), "{text}");
+        assert!(!text.contains("Quit: q"), "{text}");
     }
 
     #[test]
@@ -674,8 +803,8 @@ mod tests {
         search(&mut component, "ter");
         let terminal = render_to_terminal(&mut component);
         assert!(terminal.backend().cursor_visible());
-        // " /ter" is five cells wide, and the footer is the last row of the 70x8 area.
-        assert_eq!(terminal.backend().cursor_position(), Position::from((5, 7)));
+        // The search bar is six cells wide, and the footer is the last row of the 70x8 area.
+        assert_eq!(terminal.backend().cursor_position(), Position::from((6, 7)));
     }
 
     #[test]
@@ -698,7 +827,7 @@ mod tests {
         let mut component = component(true);
         search(&mut component, &"x".repeat(200));
         let terminal = render_to_terminal(&mut component);
-        assert!(terminal.backend().cursor_position().x < 70);
+        assert!(terminal.backend().cursor_position().x < TERMINAL_WIDTH);
     }
 
     #[test]
@@ -707,7 +836,7 @@ mod tests {
         search(&mut component, "ter");
         component.handle_event_key(key(KeyCode::Enter));
         let text = dump(&mut component);
-        assert!(text.contains("esc clear"), "{text}");
+        assert!(text.contains("Clear: <esc>"), "{text}");
     }
 
     #[test]
@@ -716,13 +845,126 @@ mod tests {
         search(&mut component, "ter");
         component.handle_event_key(key(KeyCode::Enter));
         let text = dump(&mut component);
-        assert!(text.contains("spectra  /ter"), "{text}");
+        assert!(
+            text.contains(&format!("spectra  {} ter", theme::SEARCH)),
+            "{text}"
+        );
     }
 
     #[test]
     fn test_render_advertises_the_search_key_on_an_unfiltered_list() {
         let text = dump(&mut component(true));
-        assert!(text.contains("/ search"), "{text}");
+        assert!(text.contains("Search: /"), "{text}");
+    }
+
+    fn ctrl(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::CONTROL)
+    }
+
+    /// The live filter, read back through the rows it leaves visible.
+    fn visible_labels(component: &ListComponent) -> Vec<&str> {
+        component
+            .visible
+            .iter()
+            .filter_map(|index| component.rows.get(*index))
+            .map(|row| row.label.as_str())
+            .collect()
+    }
+
+    #[test]
+    fn test_left_then_typing_inserts_mid_query() {
+        let mut component = component(true);
+        search(&mut component, "tr");
+        component.handle_event_key(key(KeyCode::Left));
+        component.handle_event_key(key(KeyCode::Char('e')));
+        assert_eq!(component.filter(), "ter");
+        assert_eq!(visible_labels(&component), vec!["spectra-ter"]);
+    }
+
+    #[test]
+    fn test_delete_removes_the_character_under_the_query_cursor() {
+        let mut component = component(true);
+        search(&mut component, "xter");
+        component.handle_event_key(key(KeyCode::Home));
+        component.handle_event_key(key(KeyCode::Delete));
+        assert_eq!(component.filter(), "ter");
+        assert_eq!(visible_labels(&component), vec!["spectra-ter"]);
+    }
+
+    #[test]
+    fn test_home_and_end_walk_the_query_cursor_to_the_edges() {
+        let mut component = component(true);
+        search(&mut component, "ec");
+        component.handle_event_key(key(KeyCode::Home));
+        component.handle_event_key(key(KeyCode::Char('s')));
+        component.handle_event_key(key(KeyCode::End));
+        component.handle_event_key(key(KeyCode::Char('t')));
+        assert_eq!(component.filter(), "sect");
+    }
+
+    #[test]
+    fn test_ctrl_w_drops_the_last_query_segment() {
+        let mut component = component(true);
+        search(&mut component, "spectra-ter");
+        component.handle_event_key(ctrl(KeyCode::Char('w')));
+        assert_eq!(component.filter(), "spectra-");
+        assert_eq!(visible_labels(&component), vec!["spectra-ter"]);
+    }
+
+    #[test]
+    fn test_ctrl_a_and_ctrl_e_jump_the_query_cursor() {
+        let mut component = component(true);
+        search(&mut component, "ec");
+        component.handle_event_key(ctrl(KeyCode::Char('a')));
+        component.handle_event_key(key(KeyCode::Char('s')));
+        component.handle_event_key(ctrl(KeyCode::Char('e')));
+        component.handle_event_key(key(KeyCode::Char('t')));
+        assert_eq!(component.filter(), "sect");
+    }
+
+    #[test]
+    fn test_a_typed_space_becomes_a_dash_in_the_query() {
+        let mut component = component(true);
+        search(&mut component, "spectra ter");
+        assert_eq!(component.filter(), "spectra-ter");
+        assert_eq!(visible_labels(&component), vec!["spectra-ter"]);
+    }
+
+    #[test]
+    fn test_an_unbound_control_key_neither_types_nor_escapes_the_bar() {
+        let mut component = component(true);
+        search(&mut component, "ter");
+        component.handle_event_key(ctrl(KeyCode::Char('c')));
+        assert_eq!(component.filter(), "ter");
+        assert!(component.editing.is_some());
+    }
+
+    #[test]
+    fn test_the_terminal_cursor_follows_the_query_cursor_left() {
+        let mut component = component(true);
+        search(&mut component, "ter");
+        component.handle_event_key(key(KeyCode::Left));
+        let terminal = render_to_terminal(&mut component);
+        // One cell back from the end-of-query column asserted above.
+        assert_eq!(terminal.backend().cursor_position(), Position::from((5, 7)));
+    }
+
+    #[test]
+    fn test_enter_commits_the_edited_query_not_the_original() {
+        let mut component = component(true);
+        search(&mut component, "tr");
+        component.handle_event_key(key(KeyCode::Left));
+        component.handle_event_key(key(KeyCode::Char('e')));
+        component.handle_event_key(key(KeyCode::Enter));
+        assert_eq!(component.query, "ter");
+        assert!(component.editing.is_none());
+    }
+
+    #[test]
+    fn test_render_marks_each_row_with_a_worktree_and_branch_icon() {
+        let text = dump(&mut component(true));
+        assert!(text.contains(theme::WORKTREE), "{text}");
+        assert!(text.contains(theme::BRANCH), "{text}");
     }
 
     #[test]
@@ -732,5 +974,231 @@ mod tests {
         assert!(!text.contains("own"), "{text}");
         assert!(text.contains("develop"), "{text}");
         assert!(text.contains('●'), "{text}");
+    }
+}
+
+#[cfg(test)]
+mod selection_tests {
+    use super::*;
+    use crate::components::{key, shift_key};
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+    use ratatui::style::Color;
+
+    fn component() -> ListComponent {
+        let rows = ["one", "two", "three"]
+            .iter()
+            .map(|name| Row {
+                label: String::from(*name),
+                branch: Some(format!("branch-{name}")),
+                dirty: None,
+                path: PathBuf::from(format!("/w/{name}")),
+            })
+            .collect();
+        ListComponent::new(String::from("repo"), rows, true)
+    }
+
+    fn marked(component: &ListComponent) -> Vec<PathBuf> {
+        component
+            .marked_rows()
+            .iter()
+            .map(|row| row.path.clone())
+            .collect()
+    }
+
+    fn path(name: &str) -> PathBuf {
+        PathBuf::from(format!("/w/{name}"))
+    }
+
+    fn dump(component: &mut ListComponent) -> String {
+        let mut terminal = Terminal::new(TestBackend::new(70, 8)).unwrap();
+        terminal
+            .draw(|frame| component.render(frame, frame.area()))
+            .unwrap();
+        crate::components::buffer_to_string(terminal.backend().buffer())
+    }
+
+    fn highlighted_rows(component: &mut ListComponent) -> Vec<u16> {
+        let mut terminal = Terminal::new(TestBackend::new(40, 8)).unwrap();
+        terminal
+            .draw(|frame| component.render(frame, frame.area()))
+            .unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        (1..6)
+            .filter(|y| {
+                buffer[(2, *y)].style().bg == Some(Color::Blue)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn test_marked_paths_is_the_cursor_row_when_no_range_is_open() {
+        assert_eq!(marked(&component()), vec![path("one")]);
+    }
+
+    #[test]
+    fn test_shift_down_extends_the_range_downward() {
+        let mut component = component();
+        component.handle_event_key(shift_key(KeyCode::Down));
+        assert_eq!(marked(&component), vec![path("one"), path("two")]);
+    }
+
+    #[test]
+    fn test_shift_j_extends_the_range_downward() {
+        let mut component = component();
+        component.handle_event_key(shift_key(KeyCode::Char('J')));
+        assert_eq!(marked(&component), vec![path("one"), path("two")]);
+    }
+
+    #[test]
+    fn test_shift_up_extends_the_range_upward() {
+        let mut component = component();
+        component.handle_event_key(key(KeyCode::Char('j')));
+        component.handle_event_key(key(KeyCode::Char('j')));
+        component.handle_event_key(shift_key(KeyCode::Up));
+        assert_eq!(marked(&component), vec![path("two"), path("three")]);
+    }
+
+    #[test]
+    fn test_shift_k_extends_the_range_upward() {
+        let mut component = component();
+        component.handle_event_key(key(KeyCode::Char('j')));
+        component.handle_event_key(shift_key(KeyCode::Char('K')));
+        assert_eq!(marked(&component), vec![path("one"), path("two")]);
+    }
+
+    #[test]
+    fn test_reversing_the_range_shrinks_it_back() {
+        let mut component = component();
+        component.handle_event_key(shift_key(KeyCode::Down));
+        component.handle_event_key(shift_key(KeyCode::Down));
+        component.handle_event_key(shift_key(KeyCode::Up));
+        assert_eq!(marked(&component), vec![path("one"), path("two")]);
+    }
+
+    #[test]
+    fn test_a_plain_move_collapses_the_range() {
+        let mut component = component();
+        component.handle_event_key(shift_key(KeyCode::Down));
+        component.handle_event_key(key(KeyCode::Down));
+        assert_eq!(marked(&component), vec![path("three")]);
+    }
+
+    #[test]
+    fn test_the_range_stops_at_the_last_row() {
+        let mut component = component();
+        for _ in 0..5 {
+            component.handle_event_key(shift_key(KeyCode::Down));
+        }
+        assert_eq!(
+            marked(&component),
+            vec![path("one"), path("two"), path("three")]
+        );
+    }
+
+    #[test]
+    fn test_a_query_collapses_the_range() {
+        let mut component = component();
+        component.handle_event_key(shift_key(KeyCode::Down));
+        component.handle_event_key(key(KeyCode::Char('/')));
+        component.handle_event_key(key(KeyCode::Char('t')));
+        assert_eq!(marked(&component), vec![path("two")]);
+    }
+
+    #[test]
+    fn test_esc_clears_the_range_before_the_filter() {
+        let mut component = component();
+        component.handle_event_key(key(KeyCode::Char('/')));
+        component.handle_event_key(key(KeyCode::Char('t')));
+        component.handle_event_key(key(KeyCode::Enter));
+        component.handle_event_key(shift_key(KeyCode::Down));
+        assert_eq!(marked(&component), vec![path("two"), path("three")]);
+
+        component.handle_event_key(key(KeyCode::Esc));
+        assert_eq!(marked(&component), vec![path("three")], "range goes first");
+        assert!(
+            !dump(&mut component).contains("one"),
+            "filter still applied"
+        );
+
+        component.handle_event_key(key(KeyCode::Esc));
+        assert_eq!(marked(&component), vec![path("one")], "then the filter");
+        assert!(dump(&mut component).contains("one"), "filter is cleared");
+    }
+
+    #[test]
+    fn test_marked_paths_is_empty_when_no_row_matches() {
+        let mut component = component();
+        component.handle_event_key(key(KeyCode::Char('/')));
+        component.handle_event_key(key(KeyCode::Char('z')));
+        assert!(marked(&component).is_empty());
+    }
+
+    #[test]
+    fn test_d_is_left_for_the_app_to_handle() {
+        let mut component = component();
+        assert!(matches!(
+            component.handle_event_key(key(KeyCode::Char('d'))),
+            KeyEventResponse::Ignored
+        ));
+    }
+
+    #[test]
+    fn test_render_inverts_the_cursor_row_instead_of_marking_it() {
+        let mut component = component();
+        assert_eq!(highlighted_rows(&mut component), vec![1]);
+    }
+
+    #[test]
+    fn test_an_open_search_bar_takes_the_selection_feedback_off_the_list() {
+        let mut component = component();
+        component.handle_event_key(key(KeyCode::Char('/')));
+        assert!(highlighted_rows(&mut component).is_empty());
+    }
+
+    #[test]
+    fn test_an_open_search_bar_hides_the_feedback_for_a_range_too() {
+        let mut component = component();
+        component.handle_event_key(shift_key(KeyCode::Down));
+        assert_eq!(highlighted_rows(&mut component), vec![1, 2]);
+        component.handle_event_key(key(KeyCode::Char('/')));
+        assert!(highlighted_rows(&mut component).is_empty());
+    }
+
+    #[test]
+    fn test_committing_the_query_gives_the_selection_feedback_back() {
+        let mut component = component();
+        component.handle_event_key(key(KeyCode::Char('/')));
+        component.handle_event_key(key(KeyCode::Enter));
+        assert_eq!(highlighted_rows(&mut component), vec![1]);
+    }
+
+    #[test]
+    fn test_cancelling_the_query_gives_the_selection_feedback_back() {
+        let mut component = component();
+        component.handle_event_key(key(KeyCode::Char('/')));
+        component.handle_event_key(key(KeyCode::Esc));
+        assert_eq!(highlighted_rows(&mut component), vec![1]);
+    }
+
+    #[test]
+    fn test_render_inverts_every_row_of_an_open_range() {
+        let mut component = component();
+        component.handle_event_key(shift_key(KeyCode::Down));
+        assert_eq!(highlighted_rows(&mut component), vec![1, 2]);
+    }
+
+    #[test]
+    fn test_render_shows_no_cursor_caret() {
+        let mut component = component();
+        let text = dump(&mut component);
+        assert!(!text.contains("> spectra"), "{text}");
+    }
+
+    #[test]
+    fn test_render_advertises_the_delete_key() {
+        let mut component = component();
+        let text = dump(&mut component);
+        assert!(text.contains("Delete: d"), "{text}");
     }
 }

@@ -2,9 +2,12 @@ use crossterm::event::KeyEvent;
 use ratatui::Frame;
 use ratatui::layout::Rect;
 
+pub mod confirm_delete;
 pub mod create_form;
 pub mod list;
 pub mod progress;
+pub mod text_input;
+pub mod theme;
 
 pub fn fit_tail(text: &str, width: usize) -> String {
     let count = text.chars().count();
@@ -33,4 +36,9 @@ pub fn buffer_to_string(buf: &ratatui::buffer::Buffer) -> String {
 #[cfg(test)]
 pub fn key(code: crossterm::event::KeyCode) -> KeyEvent {
     KeyEvent::new(code, crossterm::event::KeyModifiers::NONE)
+}
+
+#[cfg(test)]
+pub fn shift_key(code: crossterm::event::KeyCode) -> KeyEvent {
+    KeyEvent::new(code, crossterm::event::KeyModifiers::SHIFT)
 }

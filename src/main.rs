@@ -5,6 +5,7 @@ mod dirty;
 mod git;
 mod naming;
 mod node;
+mod remove;
 mod shell;
 
 const HELP: &str = "\

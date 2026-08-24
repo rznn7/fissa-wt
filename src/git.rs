@@ -80,14 +80,26 @@ pub fn short_branch(refname: &str) -> String {
         .to_string()
 }
 
-pub fn parse_origin_head(out: &str) -> Option<String> {
-    let trimmed = out.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-    trimmed
-        .strip_prefix("refs/remotes/origin/")
+pub fn parse_remote_head(out: &str, remote: &str) -> Option<String> {
+    out.trim()
+        .strip_prefix(&format!("refs/remotes/{remote}/"))
+        .filter(|branch| !branch.is_empty())
         .map(str::to_string)
+}
+
+/// `origin` when it is there, otherwise the first remote by name — a repo
+/// cloned from a single GitLab or Codeberg host is not an edge case.
+pub fn pick_default_remote(out: &str) -> Option<String> {
+    let mut remotes: Vec<&str> = out
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .collect();
+    if remotes.contains(&"origin") {
+        return Some(String::from("origin"));
+    }
+    remotes.sort();
+    remotes.first().map(|remote| String::from(*remote))
 }
 
 pub fn prefix_options(branches: &[String]) -> Vec<String> {
@@ -111,9 +123,11 @@ pub fn prefix_options(branches: &[String]) -> Vec<String> {
     prefixes
 }
 
-pub fn extract_branch_names(out: &str) -> Vec<String> {
+pub fn extract_branch_names(out: &str, remote: &str) -> Vec<String> {
+    let prefix = format!("{remote}/");
     out.lines()
-        .map(|line| line.trim().trim_start_matches("origin/"))
+        .map(|line| line.trim())
+        .map(|line| line.strip_prefix(&prefix).unwrap_or(line))
         .filter(|line| !line.is_empty())
         .map(str::to_string)
         .collect()
@@ -184,29 +198,73 @@ impl Repo {
         Ok(parse_worktree_list(&out))
     }
 
+    /// The remote everything defaults to when a branch has no upstream of its own.
+    pub fn default_remote(&self) -> String {
+        run_git(&self.source, &["remote"])
+            .ok()
+            .and_then(|out| pick_default_remote(&out))
+            .unwrap_or_else(|| String::from("origin"))
+    }
+
     pub fn default_base(&self) -> String {
+        let remote = self.default_remote();
         run_git(
             &self.source,
-            &["symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"],
+            &[
+                "symbolic-ref",
+                "--quiet",
+                &format!("refs/remotes/{remote}/HEAD"),
+            ],
         )
         .ok()
-        .and_then(|out| parse_origin_head(&out))
+        .and_then(|out| parse_remote_head(&out, &remote))
         .unwrap_or_else(|| String::from("main"))
     }
 
+    /// Deleting a branch on the wrong remote is the one mistake here that is
+    /// visible to everyone else, so this follows the branch's own upstream.
+    pub fn upstream_remote(&self, branch: &str) -> String {
+        run_git(
+            &self.source,
+            &["config", &format!("branch.{branch}.remote")],
+        )
+        .map(|out| out.trim().to_string())
+        .ok()
+        .filter(|remote| !remote.is_empty())
+        .unwrap_or_else(|| self.default_remote())
+    }
+
+    pub fn remote_branch_exists(&self, remote: &str, branch: &str) -> bool {
+        run_git(
+            &self.source,
+            &[
+                "show-ref",
+                "--verify",
+                "--quiet",
+                &format!("refs/remotes/{remote}/{branch}"),
+            ],
+        )
+        .is_ok()
+    }
+
+    pub fn delete_remote_branch(&self, remote: &str, branch: &str) -> Result<()> {
+        run_git(&self.main_clone, &["push", remote, "--delete", branch]).map(|_| ())
+    }
+
     pub fn prefixes(&self) -> Vec<String> {
+        let remote = self.default_remote();
         let out = run_git(
             &self.source,
             &[
                 "for-each-ref",
                 "--format=%(refname:short)",
                 "refs/heads",
-                "refs/remotes/origin",
+                &format!("refs/remotes/{remote}"),
             ],
         )
         .unwrap_or_default();
 
-        prefix_options(&extract_branch_names(&out))
+        prefix_options(&extract_branch_names(&out, &remote))
     }
 
     pub fn branch_exists(&self, branch: &str) -> bool {
@@ -233,6 +291,23 @@ impl Repo {
     pub fn add_worktree(&self, dir: &Path, branch: &str, base: &str) -> Result<()> {
         let dir = dir.to_string_lossy().to_string();
         run_git(&self.source, &["worktree", "add", "-b", branch, &dir, base]).map(|_| ())
+    }
+
+    /// Runs from the main clone: the worktree being removed may be the one
+    /// fissa was launched from, and git needs a surviving directory to work in.
+    pub fn remove_worktree(&self, path: &Path, force: bool) -> Result<()> {
+        let path = path.to_string_lossy().to_string();
+        let mut args = vec!["worktree", "remove"];
+        if force {
+            args.push("--force");
+        }
+        args.push(&path);
+        run_git(&self.main_clone, &args).map(|_| ())
+    }
+
+    pub fn delete_branch(&self, branch: &str, force: bool) -> Result<()> {
+        let flag = if force { "-D" } else { "-d" };
+        run_git(&self.main_clone, &["branch", flag, branch]).map(|_| ())
     }
 }
 
@@ -322,16 +397,66 @@ prunable gitdir file points to non-existent location
     }
 
     #[test]
+    fn test_pick_default_remote_prefers_origin() {
+        assert_eq!(
+            pick_default_remote("upstream\norigin\nfork\n").as_deref(),
+            Some("origin")
+        );
+    }
+
+    #[test]
+    fn test_pick_default_remote_takes_the_only_remote_there_is() {
+        assert_eq!(pick_default_remote("gitlab\n").as_deref(), Some("gitlab"));
+    }
+
+    #[test]
+    fn test_pick_default_remote_falls_back_to_the_first_by_name() {
+        assert_eq!(
+            pick_default_remote("upstream\nfork\n").as_deref(),
+            Some("fork")
+        );
+    }
+
+    #[test]
+    fn test_pick_default_remote_of_a_repo_with_no_remote_is_none() {
+        assert_eq!(pick_default_remote("\n"), None);
+    }
+
+    #[test]
+    fn test_parse_remote_head_extracts_the_branch_of_a_named_remote() {
+        assert_eq!(
+            parse_remote_head("refs/remotes/gitlab/develop\n", "gitlab").as_deref(),
+            Some("develop")
+        );
+    }
+
+    #[test]
+    fn test_parse_remote_head_ignores_a_head_of_another_remote() {
+        assert_eq!(
+            parse_remote_head("refs/remotes/origin/develop\n", "fork"),
+            None
+        );
+    }
+
+    #[test]
+    fn test_extract_branch_names_strips_a_named_remote_prefix() {
+        assert_eq!(
+            extract_branch_names("gitlab/develop", "gitlab"),
+            vec!["develop"]
+        );
+    }
+
+    #[test]
     fn test_parse_origin_head_extracts_branch() {
         assert_eq!(
-            parse_origin_head("refs/remotes/origin/develop\n").as_deref(),
+            parse_remote_head("refs/remotes/origin/develop\n", "origin").as_deref(),
             Some("develop")
         );
     }
 
     #[test]
     fn test_parse_origin_head_unset_returns_none() {
-        assert_eq!(parse_origin_head(""), None);
+        assert_eq!(parse_remote_head("", "origin"), None);
     }
 
     #[test]
@@ -396,24 +521,295 @@ prunable gitdir file points to non-existent location
 
     #[test]
     fn test_extract_branch_names_strips_origin_prefix() {
-        assert_eq!(extract_branch_names("origin/develop"), vec!["develop"]);
+        assert_eq!(
+            extract_branch_names("origin/develop", "origin"),
+            vec!["develop"]
+        );
     }
 
     #[test]
     fn test_extract_branch_names_leaves_local_branch_unchanged() {
-        assert_eq!(extract_branch_names("feature/x"), vec!["feature/x"]);
+        assert_eq!(
+            extract_branch_names("feature/x", "origin"),
+            vec!["feature/x"]
+        );
     }
 
     #[test]
     fn test_extract_branch_names_drops_blank_lines() {
         assert_eq!(
-            extract_branch_names("develop\n\nfeature/x\n"),
+            extract_branch_names("develop\n\nfeature/x\n", "origin"),
             vec!["develop", "feature/x"]
         );
     }
 
     #[test]
     fn test_extract_branch_names_trims_surrounding_whitespace() {
-        assert_eq!(extract_branch_names("  develop  \n"), vec!["develop"]);
+        assert_eq!(
+            extract_branch_names("  develop  \n", "origin"),
+            vec!["develop"]
+        );
+    }
+}
+
+#[cfg(test)]
+mod removal_tests {
+    use super::*;
+
+    fn run(cwd: &Path, args: &[&str]) {
+        let status = std::process::Command::new("git")
+            .args(args)
+            .current_dir(cwd)
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {args:?} failed");
+    }
+
+    fn commit(cwd: &Path, message: &str) {
+        run(
+            cwd,
+            &[
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@t",
+                "commit",
+                "-qm",
+                message,
+            ],
+        );
+    }
+
+    /// A main clone on `main` with a linked `side` worktree next to it.
+    fn repo_with_a_side_worktree(root: &Path) -> Repo {
+        std::fs::create_dir_all(root).unwrap();
+        run(root, &["init", "--quiet", "-b", "main"]);
+        std::fs::write(root.join("README.md"), "hi").unwrap();
+        run(root, &["add", "README.md"]);
+        commit(root, "init");
+        run(root, &["worktree", "add", "-q", "-b", "side", "../side"]);
+        Repo::discover(root).unwrap()
+    }
+
+    fn side_of(repo: &Repo) -> PathBuf {
+        repo.main_clone.parent().unwrap().join("side")
+    }
+
+    #[test]
+    fn test_remove_worktree_deletes_a_clean_worktree() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = repo_with_a_side_worktree(&tmp.path().join("main"));
+        let side = side_of(&repo);
+
+        repo.remove_worktree(&side, false).unwrap();
+
+        assert!(!side.exists());
+        assert_eq!(repo.worktrees().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn test_remove_worktree_refuses_a_worktree_with_uncommitted_changes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = repo_with_a_side_worktree(&tmp.path().join("main"));
+        let side = side_of(&repo);
+        std::fs::write(side.join("scratch.txt"), "untracked").unwrap();
+
+        assert!(repo.remove_worktree(&side, false).is_err());
+        assert!(side.exists(), "nothing uncommitted may be destroyed");
+    }
+
+    #[test]
+    fn test_remove_worktree_forces_past_uncommitted_changes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = repo_with_a_side_worktree(&tmp.path().join("main"));
+        let side = side_of(&repo);
+        std::fs::write(side.join("scratch.txt"), "untracked").unwrap();
+
+        repo.remove_worktree(&side, true).unwrap();
+
+        assert!(!side.exists());
+    }
+
+    #[test]
+    fn test_remove_worktree_works_from_the_worktree_being_removed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("main");
+        repo_with_a_side_worktree(&root);
+        let side = root.parent().unwrap().join("side");
+        // fissa is often launched from inside the worktree the user deletes.
+        let repo = Repo::discover(&side).unwrap();
+
+        repo.remove_worktree(&side, false).unwrap();
+
+        assert!(!side.exists());
+    }
+
+    #[test]
+    fn test_delete_branch_deletes_a_merged_branch() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = repo_with_a_side_worktree(&tmp.path().join("main"));
+        repo.remove_worktree(&side_of(&repo), false).unwrap();
+
+        repo.delete_branch("side", false).unwrap();
+
+        assert!(!repo.branch_exists("side"));
+    }
+
+    #[test]
+    fn test_delete_branch_refuses_an_unmerged_branch() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = repo_with_a_side_worktree(&tmp.path().join("main"));
+        let side = side_of(&repo);
+        std::fs::write(side.join("work.txt"), "work").unwrap();
+        run(&side, &["add", "work.txt"]);
+        commit(&side, "unmerged work");
+        repo.remove_worktree(&side, false).unwrap();
+
+        assert!(repo.delete_branch("side", false).is_err());
+        assert!(repo.branch_exists("side"), "unmerged work may not be lost");
+    }
+
+    #[test]
+    fn test_delete_branch_forces_past_an_unmerged_branch() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = repo_with_a_side_worktree(&tmp.path().join("main"));
+        let side = side_of(&repo);
+        std::fs::write(side.join("work.txt"), "work").unwrap();
+        run(&side, &["add", "work.txt"]);
+        commit(&side, "unmerged work");
+        repo.remove_worktree(&side, false).unwrap();
+
+        repo.delete_branch("side", true).unwrap();
+
+        assert!(!repo.branch_exists("side"));
+    }
+}
+
+#[cfg(test)]
+mod remote_tests {
+    use super::*;
+
+    fn run(cwd: &Path, args: &[&str]) {
+        let status = std::process::Command::new("git")
+            .args(args)
+            .current_dir(cwd)
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {args:?} failed");
+    }
+
+    /// A clone with `gitlab` as its only remote, plus a pushed `side` branch.
+    fn repo_with_a_named_remote(tmp: &Path) -> Repo {
+        let remote = tmp.join("remote.git");
+        run(tmp, &["init", "-q", "--bare", remote.to_str().unwrap()]);
+
+        let root = tmp.join("main");
+        std::fs::create_dir_all(&root).unwrap();
+        run(&root, &["init", "--quiet", "-b", "main"]);
+        std::fs::write(root.join("README.md"), "hi").unwrap();
+        run(&root, &["add", "README.md"]);
+        run(
+            &root,
+            &[
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@t",
+                "commit",
+                "-qm",
+                "init",
+            ],
+        );
+        run(
+            &root,
+            &["remote", "add", "gitlab", remote.to_str().unwrap()],
+        );
+        run(&root, &["push", "-q", "-u", "gitlab", "main"]);
+        run(&root, &["branch", "side"]);
+        run(&root, &["push", "-q", "-u", "gitlab", "side"]);
+        Repo::discover(&root).unwrap()
+    }
+
+    #[test]
+    fn test_default_remote_is_the_only_remote_a_repo_has() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = repo_with_a_named_remote(tmp.path());
+        assert_eq!(repo.default_remote(), "gitlab");
+    }
+
+    #[test]
+    fn test_prefixes_sees_the_branches_of_a_remote_not_called_origin() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("main");
+        let repo = repo_with_a_named_remote(tmp.path());
+        run(&root, &["branch", "feature/x"]);
+        run(&root, &["push", "-q", "gitlab", "feature/x"]);
+
+        assert!(
+            repo.prefixes().contains(&String::from("feature/")),
+            "{:?}",
+            repo.prefixes()
+        );
+    }
+
+    #[test]
+    fn test_default_base_reads_the_head_of_a_remote_not_called_origin() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("main");
+        let repo = repo_with_a_named_remote(tmp.path());
+        run(&root, &["remote", "set-head", "gitlab", "main"]);
+
+        assert_eq!(repo.default_base(), "main");
+    }
+
+    #[test]
+    fn test_upstream_remote_of_a_tracking_branch_is_the_remote_it_tracks() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = repo_with_a_named_remote(tmp.path());
+        assert_eq!(repo.upstream_remote("side"), "gitlab");
+    }
+
+    #[test]
+    fn test_upstream_remote_of_a_local_only_branch_falls_back_to_the_default() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("main");
+        let repo = repo_with_a_named_remote(tmp.path());
+        run(&root, &["branch", "local-only"]);
+        assert_eq!(repo.upstream_remote("local-only"), "gitlab");
+    }
+
+    #[test]
+    fn test_remote_branch_exists_for_a_pushed_branch() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = repo_with_a_named_remote(tmp.path());
+        assert!(repo.remote_branch_exists("gitlab", "side"));
+    }
+
+    #[test]
+    fn test_remote_branch_does_not_exist_for_a_branch_never_pushed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("main");
+        let repo = repo_with_a_named_remote(tmp.path());
+        run(&root, &["branch", "local-only"]);
+        assert!(!repo.remote_branch_exists("gitlab", "local-only"));
+    }
+
+    #[test]
+    fn test_delete_remote_branch_removes_it_from_the_remote() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = repo_with_a_named_remote(tmp.path());
+
+        repo.delete_remote_branch("gitlab", "side").unwrap();
+
+        let out = run_git(&repo.main_clone, &["ls-remote", "--heads", "gitlab"]).unwrap();
+        assert!(!out.contains("refs/heads/side"), "{out}");
+        assert!(out.contains("refs/heads/main"), "{out}");
+    }
+
+    #[test]
+    fn test_delete_remote_branch_reports_a_branch_that_is_not_there() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = repo_with_a_named_remote(tmp.path());
+        assert!(repo.delete_remote_branch("gitlab", "never-pushed").is_err());
     }
 }
