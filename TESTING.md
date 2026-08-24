@@ -55,8 +55,10 @@ and `│` are three bytes each. If a render assertion involves a position, conve
 
 Run before a release:
 
-1. `eval "$(fissa --shell-init)"` in bash and in zsh, then `enter` actually cds.
-2. `fissa --help`, `--version` and `--shell-init` all still print with the wrapper active.
+1. `eval "$(fissa init bash)"` in bash and `eval "$(fissa init zsh)"` in zsh, then
+   `enter` actually cds.
+2. `fissa --help`, `fissa --version` and `fissa init bash` all still print with the
+   wrapper active.
 3. Creating a worktree with `npm ci` leaves a `node_modules` in each locked package and
    the result builds.
 4. `q` and a panic both leave the terminal usable (`stty -a` shows `icanon`).
@@ -66,5 +68,5 @@ Run before a release:
 8. `r` on a pushed branch really removes it from the remote; the row shows no `r` hint
    for a branch that was never pushed.
 
-`cargo build` does not update an installed binary — re-run `cargo install --path .`
-before any manual check, or you will be testing the previous version.
+`cargo build` does not update an installed binary; re-run `make install` before any
+manual check, or you will be testing the previous version.
