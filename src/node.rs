@@ -14,8 +14,30 @@ impl Strategy {
 
     pub fn label(&self) -> &'static str {
         match self {
-            Strategy::Install => "npm ci",
+            Strategy::Install => "install",
             Strategy::None => "skip",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Manager {
+    Npm,
+    Pnpm,
+}
+
+impl Manager {
+    pub fn label(&self) -> &'static str {
+        match self {
+            Manager::Npm => "npm ci",
+            Manager::Pnpm => "pnpm install",
+        }
+    }
+
+    pub fn command(&self) -> (&'static str, &'static [&'static str]) {
+        match self {
+            Manager::Npm => ("npm", &["ci"]),
+            Manager::Pnpm => ("pnpm", &["install", "--frozen-lockfile"]),
         }
     }
 }
@@ -23,7 +45,7 @@ impl Strategy {
 #[derive(Debug, PartialEq, Eq)]
 pub struct Target {
     pub rel: PathBuf,
-    pub has_lockfile: bool,
+    pub lockfile: Option<Manager>,
 }
 
 pub fn discover_targets(source_root: &Path) -> Vec<Target> {
@@ -36,7 +58,7 @@ pub fn discover_targets(source_root: &Path) -> Vec<Target> {
         };
 
         let mut has_package_json = false;
-        let mut has_lockfile = false;
+        let mut lockfile = None;
         let mut subdirs = Vec::new();
 
         for entry in entries.flatten() {
@@ -50,9 +72,10 @@ pub fn discover_targets(source_root: &Path) -> Vec<Target> {
                 has_package_json = true;
                 continue;
             }
-            if (name == "package-lock.json" || name == "npm-shrinkwrap.json") && file_type.is_file()
+            if file_type.is_file()
+                && let Some(manager) = manager_for_lockfile(&name)
             {
-                has_lockfile = true;
+                lockfile = Some(manager);
                 continue;
             }
             if name == "node_modules" {
@@ -69,7 +92,7 @@ pub fn discover_targets(source_root: &Path) -> Vec<Target> {
         if has_package_json && let Ok(rel) = dir.strip_prefix(source_root) {
             found.push(Target {
                 rel: rel.to_path_buf(),
-                has_lockfile,
+                lockfile,
             });
         }
 
@@ -80,29 +103,42 @@ pub fn discover_targets(source_root: &Path) -> Vec<Target> {
     found
 }
 
+fn manager_for_lockfile(name: &str) -> Option<Manager> {
+    match name {
+        "package-lock.json" | "npm-shrinkwrap.json" => Some(Manager::Npm),
+        "pnpm-lock.yaml" => Some(Manager::Pnpm),
+        _ => None,
+    }
+}
+
 pub fn targets_for(strategy: Strategy, targets: &[Target]) -> Vec<&Target> {
     match strategy {
-        Strategy::Install => targets.iter().filter(|t| t.has_lockfile).collect(),
+        Strategy::Install => targets.iter().filter(|t| t.lockfile.is_some()).collect(),
         Strategy::None => Vec::new(),
     }
 }
 
-/// Captures npm's output rather than inheriting it: the TUI owns stderr.
-pub fn npm_ci(dir: &Path) -> Result<()> {
-    let output = Command::new("npm")
-        .arg("ci")
+/// Captures the installer's output rather than inheriting it: the TUI owns stderr.
+pub fn install(manager: Manager, dir: &Path) -> Result<()> {
+    let (program, args) = manager.command();
+    let output = Command::new(program)
+        .args(args)
         .current_dir(dir)
         .stdin(Stdio::null())
         .output()
-        .context("failed to run npm — is it installed and on PATH?")?;
+        .with_context(|| format!("failed to run {program} — is it installed and on PATH?"))?;
 
     if !output.status.success() {
-        return Err(anyhow!("npm ci: {}", npm_error_summary(&output.stderr)));
+        return Err(anyhow!(
+            "{}: {}",
+            manager.label(),
+            error_summary(&output.stderr)
+        ));
     }
     Ok(())
 }
 
-fn npm_error_summary(stderr: &[u8]) -> String {
+fn error_summary(stderr: &[u8]) -> String {
     String::from_utf8_lossy(stderr)
         .lines()
         .filter_map(|line| {
@@ -115,7 +151,7 @@ fn npm_error_summary(stderr: &[u8]) -> String {
             (!line.is_empty() && !line.starts_with("code ")).then(|| line.to_string())
         })
         .next()
-        .unwrap_or_else(|| String::from("see npm output"))
+        .unwrap_or_else(|| String::from("see the installer output"))
 }
 
 pub fn available_strategies(targets: &[Target]) -> Vec<Strategy> {
@@ -129,7 +165,7 @@ pub fn unavailable_reason(strategy: Strategy, targets: &[Target]) -> Option<&'st
     match strategy {
         Strategy::Install => targets_for(strategy, targets)
             .is_empty()
-            .then_some("no package-lock.json next to a package.json"),
+            .then_some("no lockfile next to a package.json"),
         Strategy::None => None,
     }
 }
@@ -216,8 +252,8 @@ mod tests {
             .iter()
             .find(|t| t.rel == Path::new("tools"))
             .unwrap();
-        assert!(app.has_lockfile);
-        assert!(!tools.has_lockfile);
+        assert_eq!(app.lockfile, Some(Manager::Npm));
+        assert_eq!(tools.lockfile, None);
     }
 
     #[test]
@@ -228,7 +264,41 @@ mod tests {
         fs::write(root.join("app/npm-shrinkwrap.json"), "{}").unwrap();
 
         let targets = discover_targets(root);
-        assert!(targets[0].has_lockfile);
+        assert_eq!(targets[0].lockfile, Some(Manager::Npm));
+    }
+
+    #[test]
+    fn test_discover_targets_recognises_a_pnpm_lockfile() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        write_pkg(root, "app");
+        fs::write(root.join("app/pnpm-lock.yaml"), "").unwrap();
+
+        let targets = discover_targets(root);
+        assert_eq!(targets[0].lockfile, Some(Manager::Pnpm));
+    }
+
+    #[test]
+    fn test_discover_targets_keeps_each_managers_own_lockfile() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        write_pkg(root, "api");
+        write_lock(root, "api");
+        write_pkg(root, "web");
+        fs::write(root.join("web/pnpm-lock.yaml"), "").unwrap();
+
+        let targets = discover_targets(root);
+        let managers: Vec<Option<Manager>> = targets.iter().map(|t| t.lockfile).collect();
+        assert_eq!(managers, vec![Some(Manager::Npm), Some(Manager::Pnpm)]);
+    }
+
+    #[test]
+    fn test_manager_commands_are_the_lockfile_respecting_ones() {
+        assert_eq!(Manager::Npm.command(), ("npm", &["ci"][..]));
+        assert_eq!(
+            Manager::Pnpm.command(),
+            ("pnpm", &["install", "--frozen-lockfile"][..])
+        );
     }
 
     #[test]
@@ -236,11 +306,11 @@ mod tests {
         let targets = vec![
             Target {
                 rel: PathBuf::new(),
-                has_lockfile: false,
+                lockfile: None,
             },
             Target {
                 rel: PathBuf::from("app"),
-                has_lockfile: true,
+                lockfile: Some(Manager::Npm),
             },
         ];
         let selected = targets_for(Strategy::Install, &targets);
@@ -278,32 +348,32 @@ mod tests {
         let targets = discover_targets(root);
         assert_eq!(
             unavailable_reason(Strategy::Install, &targets),
-            Some("no package-lock.json next to a package.json")
+            Some("no lockfile next to a package.json")
         );
     }
 
     #[test]
-    fn test_npm_error_summary_reports_the_reason_not_the_code() {
+    fn test_error_summary_reports_the_reason_not_the_code() {
         let stderr = b"npm error code EUSAGE\n\
                        npm error\n\
                        npm error The `npm ci` command can only install with an existing package-lock.json or\n\
                        npm error npm-shrinkwrap.json with lockfileVersion >= 1.\n";
         assert_eq!(
-            npm_error_summary(stderr),
+            error_summary(stderr),
             "The `npm ci` command can only install with an existing package-lock.json or"
         );
     }
 
     #[test]
-    fn test_npm_error_summary_falls_back_when_stderr_is_empty() {
-        assert_eq!(npm_error_summary(b""), "see npm output");
+    fn test_error_summary_falls_back_when_stderr_is_empty() {
+        assert_eq!(error_summary(b""), "see the installer output");
     }
 
     #[test]
     fn test_targets_for_none_selects_nothing() {
         let targets = vec![Target {
             rel: PathBuf::from("app"),
-            has_lockfile: true,
+            lockfile: Some(Manager::Npm),
         }];
         assert!(targets_for(Strategy::None, &targets).is_empty());
     }
@@ -334,7 +404,7 @@ mod tests {
 
     #[test]
     fn test_strategy_labels_name_the_command_that_runs() {
-        assert_eq!(Strategy::Install.label(), "npm ci");
+        assert_eq!(Strategy::Install.label(), "install");
         assert_eq!(Strategy::None.label(), "skip");
     }
 }

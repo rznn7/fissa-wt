@@ -603,7 +603,7 @@ mod tests {
         assert!(text.contains("feature/spe-11667"), "{text}");
         assert!(text.contains("spectra-spe-11667"), "{text}");
         assert!(text.contains("directory already exists"), "{text}");
-        assert!(text.contains("npm ci"), "{text}");
+        assert!(text.contains("install"), "{text}");
         assert!(text.contains(theme::WARN), "{text}");
     }
 
@@ -772,11 +772,11 @@ mod tests {
     }
 
     #[test]
-    fn test_render_labels_the_deps_row_with_the_command() {
+    fn test_render_labels_the_deps_row_with_the_strategy() {
         let mut form = form();
         let text = dump(&mut form);
         assert!(text.contains("deps"), "{text}");
-        assert!(text.contains("npm ci"), "{text}");
+        assert!(text.contains("install"), "{text}");
         assert!(!text.contains("modules"), "{text}");
     }
 

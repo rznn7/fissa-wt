@@ -6,8 +6,14 @@ use crate::node::{self, Strategy, Target};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Action {
-    AddWorktree { branch: String, base: String },
-    Install { rel: PathBuf },
+    AddWorktree {
+        branch: String,
+        base: String,
+    },
+    Install {
+        rel: PathBuf,
+        manager: node::Manager,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -32,15 +38,18 @@ pub fn plan_steps(branch: &str, base: &str, strategy: Strategy, targets: &[Targe
 
     for target in node::targets_for(strategy, targets) {
         let rel = target.rel.clone();
+        let Some(manager) = target.lockfile else {
+            continue;
+        };
         let shown = if rel.as_os_str().is_empty() {
-            String::from("npm ci")
+            String::from(manager.label())
         } else {
-            format!("npm ci  {}", rel.to_string_lossy())
+            format!("{}  {}", manager.label(), rel.to_string_lossy())
         };
 
         steps.push(Step {
             label: shown,
-            action: Action::Install { rel },
+            action: Action::Install { rel, manager },
         });
     }
 
@@ -50,7 +59,7 @@ pub fn plan_steps(branch: &str, base: &str, strategy: Strategy, targets: &[Targe
 pub fn skip_reason(dest: &Path, step: &Step) -> Option<&'static str> {
     let rel = match &step.action {
         Action::AddWorktree { .. } => return None,
-        Action::Install { rel } => rel,
+        Action::Install { rel, .. } => rel,
     };
     if dest.join(rel).is_dir() {
         None
@@ -123,9 +132,9 @@ fn run_step(repo_source: &Path, request: &Request, step: &Step) -> anyhow::Resul
             repo.add_worktree(&request.dest, branch, base)?;
             Ok(String::from("created"))
         }
-        Action::Install { rel } => {
+        Action::Install { rel, manager } => {
             let dir = request.dest.join(rel);
-            node::npm_ci(&dir)?;
+            node::install(*manager, &dir)?;
             Ok(String::from("installed"))
         }
     }
@@ -139,13 +148,39 @@ mod tests {
         vec![
             Target {
                 rel: PathBuf::from("app"),
-                has_lockfile: true,
+                lockfile: Some(node::Manager::Npm),
             },
             Target {
                 rel: PathBuf::from("tools"),
-                has_lockfile: true,
+                lockfile: Some(node::Manager::Npm),
             },
         ]
+    }
+
+    #[test]
+    fn test_plan_steps_carries_the_manager_into_the_install_action() {
+        let targets = vec![Target {
+            rel: PathBuf::from("app"),
+            lockfile: Some(node::Manager::Pnpm),
+        }];
+        let steps = plan_steps("feature/x", "develop", Strategy::Install, &targets);
+        assert_eq!(
+            steps[1].action,
+            Action::Install {
+                rel: PathBuf::from("app"),
+                manager: node::Manager::Pnpm,
+            }
+        );
+    }
+
+    #[test]
+    fn test_plan_steps_labels_a_pnpm_target_with_its_own_command() {
+        let targets = vec![Target {
+            rel: PathBuf::from("app"),
+            lockfile: Some(node::Manager::Pnpm),
+        }];
+        let steps = plan_steps("feature/x", "develop", Strategy::Install, &targets);
+        assert_eq!(steps[1].label, "pnpm install  app");
     }
 
     #[test]
@@ -153,11 +188,11 @@ mod tests {
         let targets = vec![
             Target {
                 rel: PathBuf::new(),
-                has_lockfile: false,
+                lockfile: None,
             },
             Target {
                 rel: PathBuf::from("app"),
-                has_lockfile: true,
+                lockfile: Some(node::Manager::Npm),
             },
         ];
         let steps = plan_steps("feature/x", "develop", Strategy::Install, &targets);
@@ -202,6 +237,7 @@ mod tests {
             label: String::from("app/node_modules"),
             action: Action::Install {
                 rel: PathBuf::from("app"),
+                manager: node::Manager::Npm,
             },
         };
         assert_eq!(skip_reason(tmp.path(), &step), None);
@@ -214,6 +250,7 @@ mod tests {
             label: String::from("build/dist/vendored/node_modules"),
             action: Action::Install {
                 rel: PathBuf::from("build/dist/vendored"),
+                manager: node::Manager::Npm,
             },
         };
         assert_eq!(
@@ -226,7 +263,7 @@ mod tests {
     fn test_plan_steps_labels_a_root_package_with_the_bare_command() {
         let targets = vec![Target {
             rel: PathBuf::new(),
-            has_lockfile: true,
+            lockfile: Some(node::Manager::Npm),
         }];
         let steps = plan_steps("feature/x", "develop", Strategy::Install, &targets);
         assert_eq!(steps[1].label, "npm ci");
@@ -247,6 +284,7 @@ mod tests {
             label: format!("npm ci  {rel}"),
             action: Action::Install {
                 rel: PathBuf::from(rel),
+                manager: node::Manager::Npm,
             },
         }
     }
@@ -272,7 +310,7 @@ mod tests {
     fn test_run_steps_reports_every_install_even_when_one_fails() {
         let steps = vec![worktree_step(), install_step("app"), install_step("tools")];
         let messages = collect(&steps, |step| match &step.action {
-            Action::Install { rel } if rel == Path::new("app") => {
+            Action::Install { rel, .. } if rel == Path::new("app") => {
                 Err(anyhow::anyhow!("npm ci: broken lockfile"))
             }
             _ => Ok(String::from("done")),

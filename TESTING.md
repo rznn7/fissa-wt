@@ -17,7 +17,7 @@ lightly where it is not.
 | **Join point** | `build_rows` over a real temp git repo | `git init` in a `tempfile` dir | two tests |
 | **Concurrency** | chains overlap; a chain stops at its first failure | inject a runner into `run_chains`, count peak concurrency | Yes |
 | **Remotes** | default remote choice, upstream resolution, remote branch deletion | push to a bare repo in a `tempfile` dir | Yes |
-| **`npm ci`, real 1 GB repos, real terminals** | — | not tested | No |
+| **Real installs, real 1 GB repos, real terminals** | — | not tested | No |
 
 No golden snapshots, no `insta`, no `mockall`. Std `assert_eq!` plus ratatui's
 `TestBackend` only.
@@ -47,7 +47,8 @@ and `│` are three bytes each. If a render assertion involves a position, conve
 
 ## What we deliberately don't test
 
-- `npm ci` — slow, network-dependent, and the wrapper is three lines.
+- `npm ci` and `pnpm install` are slow, network-dependent, and the wrapper is three
+  lines.
 - Exact layout and styling — smoke tests check presence and alignment, not pixels.
 - zsh — the shell function's tests run under `bash`; zsh is verified by hand.
 
@@ -59,8 +60,8 @@ Run before a release:
    `enter` actually cds.
 2. `fissa --help`, `fissa --version` and `fissa init bash` all still print with the
    wrapper active.
-3. Creating a worktree with `npm ci` leaves a `node_modules` in each locked package and
-   the result builds.
+3. Creating a worktree with install leaves a `node_modules` in each locked package, for
+   an npm repo and a pnpm one, and the result builds.
 4. `q` and a panic both leave the terminal usable (`stty -a` shows `icanon`).
 5. The footer shows the shell-init hint when `FISSA_SHELL_INIT` is unset.
 6. On a repo with no `package.json`, the form's `deps` row is absent.
