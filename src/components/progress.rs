@@ -79,7 +79,6 @@ impl ProgressComponent {
                     *slot = message.clone();
                 }
                 self.failure = Some(message);
-                self.finished = true;
             }
             Progress::Finished => self.finished = true,
         }
@@ -183,11 +182,20 @@ mod tests {
     }
 
     #[test]
-    fn test_apply_failed_records_the_failure_and_finishes() {
+    fn test_apply_failed_records_the_failure_without_finishing() {
         let mut component = component();
         component.apply(Progress::Failed(1, String::from("cp failed")));
         assert_eq!(component.failure(), Some("cp failed"));
+        assert!(!component.finished());
+    }
+
+    #[test]
+    fn test_apply_finished_after_a_failure_finishes() {
+        let mut component = component();
+        component.apply(Progress::Failed(1, String::from("cp failed")));
+        component.apply(Progress::Finished);
         assert!(component.finished());
+        assert_eq!(component.failure(), Some("cp failed"));
     }
 
     /// The marker cell of a step: column 1, row 1, both inside the block border.
@@ -314,6 +322,7 @@ mod tests {
     fn test_render_offers_only_the_list_after_a_failure() {
         let mut component = component();
         component.apply(Progress::Failed(0, String::from("branch exists")));
+        component.apply(Progress::Finished);
         let text = dump(&mut component);
         assert!(text.contains("enter list"), "{text}");
         assert!(!text.contains("enter cd"), "{text}");

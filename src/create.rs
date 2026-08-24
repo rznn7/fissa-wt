@@ -67,22 +67,56 @@ pub fn skip_reason(dest: &Path, step: &Step) -> Option<&'static str> {
 
 pub fn spawn(repo_source: PathBuf, request: Request, tx: Sender<Progress>) {
     std::thread::spawn(move || {
-        for (index, step) in request.steps.iter().enumerate() {
-            let _ = tx.send(Progress::Running(index));
-
-            let outcome = run_step(&repo_source, &request, step);
-            match outcome {
-                Ok(detail) => {
-                    let _ = tx.send(Progress::Ok(index, detail));
-                }
-                Err(error) => {
-                    let _ = tx.send(Progress::Failed(index, error.to_string()));
-                    return;
-                }
-            }
-        }
-        let _ = tx.send(Progress::Finished);
+        run_steps(&request.steps, &tx, |step| {
+            run_step(&repo_source, &request, step)
+        });
     });
+}
+
+/// The worktree must exist before anything installs into it, so the leading
+/// steps run in order; the installs that follow are independent and overlap.
+fn run_steps<F>(steps: &[Step], tx: &Sender<Progress>, run: F)
+where
+    F: Fn(&Step) -> anyhow::Result<String> + Send + Sync,
+{
+    let first_install = steps
+        .iter()
+        .position(|step| matches!(step.action, Action::Install { .. }))
+        .unwrap_or(steps.len());
+
+    for (index, step) in steps[..first_install].iter().enumerate() {
+        if !report(tx, index, step, &run) {
+            let _ = tx.send(Progress::Finished);
+            return;
+        }
+    }
+
+    std::thread::scope(|scope| {
+        for (offset, step) in steps[first_install..].iter().enumerate() {
+            let tx = tx.clone();
+            let run = &run;
+            scope.spawn(move || report(&tx, first_install + offset, step, run));
+        }
+    });
+
+    let _ = tx.send(Progress::Finished);
+}
+
+fn report<F>(tx: &Sender<Progress>, index: usize, step: &Step, run: &F) -> bool
+where
+    F: Fn(&Step) -> anyhow::Result<String>,
+{
+    let _ = tx.send(Progress::Running(index));
+    match run(step) {
+        Ok(detail) => {
+            let _ = tx.send(Progress::Ok(index, detail));
+            true
+        }
+        Err(error) => {
+            let _ = tx.send(Progress::Failed(index, error.to_string()));
+            false
+        }
+    }
 }
 
 fn run_step(repo_source: &Path, request: &Request, step: &Step) -> anyhow::Result<String> {
@@ -202,6 +236,112 @@ mod tests {
         }];
         let steps = plan_steps("feature/x", "develop", Strategy::Install, &targets);
         assert_eq!(steps[1].label, "npm ci");
+    }
+
+    fn worktree_step() -> Step {
+        Step {
+            label: String::from("git worktree add  feature/x"),
+            action: Action::AddWorktree {
+                branch: String::from("feature/x"),
+                base: String::from("develop"),
+            },
+        }
+    }
+
+    fn install_step(rel: &str) -> Step {
+        Step {
+            label: format!("npm ci  {rel}"),
+            action: Action::Install {
+                rel: PathBuf::from(rel),
+            },
+        }
+    }
+
+    fn collect<F>(steps: &[Step], run: F) -> Vec<String>
+    where
+        F: Fn(&Step) -> anyhow::Result<String> + Send + Sync,
+    {
+        let (tx, rx) = std::sync::mpsc::channel();
+        run_steps(steps, &tx, run);
+        drop(tx);
+        rx.iter()
+            .map(|progress| match progress {
+                Progress::Running(index) => format!("running {index}"),
+                Progress::Ok(index, detail) => format!("ok {index} {detail}"),
+                Progress::Failed(index, message) => format!("failed {index} {message}"),
+                Progress::Finished => String::from("finished"),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn test_run_steps_reports_every_install_even_when_one_fails() {
+        let steps = vec![worktree_step(), install_step("app"), install_step("tools")];
+        let messages = collect(&steps, |step| match &step.action {
+            Action::Install { rel } if rel == Path::new("app") => {
+                Err(anyhow::anyhow!("npm ci: broken lockfile"))
+            }
+            _ => Ok(String::from("done")),
+        });
+
+        assert!(
+            messages.contains(&String::from("failed 1 npm ci: broken lockfile")),
+            "{messages:?}"
+        );
+        assert!(
+            messages.contains(&String::from("ok 2 done")),
+            "{messages:?}"
+        );
+        assert_eq!(messages.last(), Some(&String::from("finished")));
+    }
+
+    #[test]
+    fn test_run_steps_skips_the_installs_when_the_worktree_add_fails() {
+        let steps = vec![worktree_step(), install_step("app")];
+        let messages = collect(&steps, |step| match &step.action {
+            Action::AddWorktree { .. } => Err(anyhow::anyhow!("branch exists")),
+            _ => Ok(String::from("done")),
+        });
+
+        assert_eq!(
+            messages,
+            vec![
+                String::from("running 0"),
+                String::from("failed 0 branch exists"),
+                String::from("finished"),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_run_steps_runs_the_installs_concurrently() {
+        let steps = vec![worktree_step(), install_step("app"), install_step("tools")];
+        let installs = steps.len() - 1;
+        let started = std::sync::atomic::AtomicUsize::new(0);
+
+        let messages = collect(&steps, |step| {
+            if !matches!(step.action, Action::Install { .. }) {
+                return Ok(String::from("created"));
+            }
+            started.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            while started.load(std::sync::atomic::Ordering::SeqCst) < installs {
+                if std::time::Instant::now() > deadline {
+                    return Err(anyhow::anyhow!("installs did not overlap"));
+                }
+                std::thread::yield_now();
+            }
+            Ok(String::from("installed"))
+        });
+
+        assert!(
+            messages.contains(&String::from("ok 1 installed")),
+            "{messages:?}"
+        );
+        assert!(
+            messages.contains(&String::from("ok 2 installed")),
+            "{messages:?}"
+        );
     }
 
     #[test]
