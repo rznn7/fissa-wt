@@ -216,19 +216,21 @@ impl CreateForm {
 
 impl Component for CreateForm {
     fn render(&mut self, frame: &mut Frame, area: Rect) {
+        let [body, footer] =
+            Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(area);
+
         let block = Block::bordered().title(Line::from(vec![
             Span::from(format!(" {} ", theme::NEW)),
             Span::styled("new worktree", theme::title()),
             Span::from(" "),
         ]));
-        let inner = block.inner(area);
-        block.render(area, frame.buffer_mut());
+        let inner = block.inner(body);
+        block.render(body, frame.buffer_mut());
 
-        let [fields, preview, error, footer] = Layout::vertical([
+        let [fields, preview, error] = Layout::vertical([
             Constraint::Length(self.fields.len() as u16),
             Constraint::Length(3),
-            Constraint::Length(1),
-            Constraint::Length(1),
+            Constraint::Min(1),
         ])
         .areas(inner);
 
@@ -304,8 +306,15 @@ impl Component for CreateForm {
             .render(error, frame.buffer_mut());
         }
 
+        let cycle_hint = match self.focus {
+            Field::Prefix | Field::Deps => "Cycle: ←→ | ",
+            _ => "",
+        };
         Paragraph::new(
-            Line::from(" Field: <tab>/↑↓ | Move: ←→ | Create: <enter> | Cancel: <esc>").dim(),
+            Line::from(format!(
+                " Field: <tab> | {cycle_hint}Create: <enter> | Cancel: <esc>"
+            ))
+            .dim(),
         )
         .render(footer, frame.buffer_mut());
     }
@@ -748,10 +757,18 @@ mod tests {
     }
 
     #[test]
-    fn test_render_footer_shows_both_field_movement_forms() {
+    fn test_render_footer_hides_the_cycle_hint_on_a_typed_field() {
         let text = dump(&mut form());
-        assert!(text.contains("Field: <tab>/↑↓"), "{text}");
-        assert!(text.contains("Move: ←→"), "{text}");
+        assert!(text.contains("Field: <tab>"), "{text}");
+        assert!(!text.contains("Cycle: ←→"), "{text}");
+    }
+
+    #[test]
+    fn test_render_footer_shows_the_cycle_hint_on_a_cycled_field() {
+        let mut form = form();
+        form.handle_event_key(key(KeyCode::Tab));
+        let text = dump(&mut form);
+        assert!(text.contains("Cycle: ←→"), "{text}");
     }
 
     #[test]

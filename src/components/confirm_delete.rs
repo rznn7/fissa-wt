@@ -116,16 +116,20 @@ impl Component for ConfirmDelete {
                     Some(remote) => format!("  ({remote})"),
                     None => String::new(),
                 };
-                let mut spans = vec![Span::from(format!(
-                    " {:<label_width$}  {} {}{remote}  ",
-                    fit_tail(&entry.label, label_width),
-                    theme::BRANCH,
-                    entry.branch.as_deref().unwrap_or("(detached)"),
-                ))];
-                if entry.dirty {
-                    spans.push(Span::styled(theme::DIRTY, theme::dirty()));
-                }
-                Line::from(spans)
+                let marker = if entry.dirty {
+                    Span::styled(format!(" {} ", theme::DIRTY), theme::dirty())
+                } else {
+                    Span::from("   ")
+                };
+                Line::from(vec![
+                    marker,
+                    Span::from(format!(
+                        "{:<label_width$}  {} {}{remote}",
+                        fit_tail(&entry.label, label_width),
+                        theme::BRANCH,
+                        entry.branch.as_deref().unwrap_or("(detached)"),
+                    )),
+                ])
             })
             .collect();
 
@@ -337,7 +341,7 @@ mod tests {
     #[test]
     fn test_render_marks_a_worktree_with_uncommitted_changes() {
         let text = dump(&mut component());
-        assert!(text.contains('●'), "{text}");
+        assert!(text.contains(theme::DIRTY), "{text}");
     }
 
     #[test]
@@ -351,7 +355,7 @@ mod tests {
         let mut component = ConfirmDelete::new(vec![entry("one", None, false)]);
         let text = dump(&mut component);
         assert!(!text.contains("uncommitted"), "{text}");
-        assert!(!text.contains('●'), "{text}");
+        assert!(!text.contains(theme::DIRTY), "{text}");
     }
 
     #[test]

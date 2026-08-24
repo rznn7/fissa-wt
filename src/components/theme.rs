@@ -1,8 +1,8 @@
 use ratatui::style::{Color, Modifier, Style};
 
-pub const BRANCH: &str = "\u{e0a0}";
+pub const BRANCH: &str = "\u{f418}";
 pub const WORKTREE: &str = "\u{f07b}";
-pub const DIRTY: &str = "●";
+pub const DIRTY: &str = "✱";
 pub const SEARCH: &str = "\u{f002}";
 pub const NEW: &str = "\u{f067}";
 pub const TRASH: &str = "\u{f1f8}";

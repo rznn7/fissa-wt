@@ -249,6 +249,11 @@ impl Component for ListComponent {
                 ));
                 let label = if nested { label.dim() } else { label };
                 let spans = vec![
+                    if row.dirty == Some(true) {
+                        Span::styled(format!("{} ", theme::DIRTY), theme::dirty())
+                    } else {
+                        Span::from("  ")
+                    },
                     icon,
                     label,
                     Span::from(format!("{} ", theme::BRANCH)).dim(),
@@ -256,11 +261,6 @@ impl Component for ListComponent {
                         "{:<branch_width$}",
                         fit_tail(row.branch_or_detached(), branch_width)
                     )),
-                    if row.dirty == Some(true) {
-                        Span::styled(format!("{} ", theme::DIRTY), theme::dirty())
-                    } else {
-                        Span::from("  ")
-                    },
                 ];
                 let item = ListItem::new(Line::from(spans));
                 if marked.contains(&slot) {
@@ -504,7 +504,7 @@ mod tests {
         let text = dump(&mut component(true));
         assert!(text.contains("spectra"), "{text}");
         assert!(text.contains("develop"), "{text}");
-        assert!(text.contains('●'), "{text}");
+        assert!(text.contains(theme::DIRTY), "{text}");
         assert!(text.contains("Cd: <enter>"), "{text}");
     }
 
@@ -973,7 +973,7 @@ mod tests {
         assert!(!text.contains("link"), "{text}");
         assert!(!text.contains("own"), "{text}");
         assert!(text.contains("develop"), "{text}");
-        assert!(text.contains('●'), "{text}");
+        assert!(text.contains(theme::DIRTY), "{text}");
     }
 }
 
@@ -1025,9 +1025,7 @@ mod selection_tests {
             .unwrap();
         let buffer = terminal.backend().buffer().clone();
         (1..6)
-            .filter(|y| {
-                buffer[(2, *y)].style().bg == Some(Color::Blue)
-            })
+            .filter(|y| buffer[(2, *y)].style().bg == Some(Color::Blue))
             .collect()
     }
 
