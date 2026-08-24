@@ -14,10 +14,11 @@ Requires a Rust toolchain and `git` (≥ 2.31). Linux only.
 cargo install fissa-wt
 ```
 
-Then enable `cd` on exit by adding this to `~/.zshrc` or `~/.bashrc`:
+Then enable `cd` on exit by adding the matching line to `~/.zshrc` or `~/.bashrc`:
 
 ```sh
-eval "$(fissa --shell-init)"
+eval "$(fissa init zsh)"
+eval "$(fissa init bash)"
 ```
 
 Restart your shell. Without this step everything works except landing in the
