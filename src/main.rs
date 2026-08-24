@@ -1,6 +1,7 @@
 mod app;
 mod components;
 mod create;
+mod dirty;
 mod git;
 mod naming;
 mod node;

@@ -136,6 +136,12 @@ fn file_name_or_path(path: &Path) -> String {
     }
 }
 
+pub fn is_dirty(worktree: &Path) -> bool {
+    run_git(worktree, &["status", "--porcelain"])
+        .map(|out| !out.trim().is_empty())
+        .unwrap_or(false)
+}
+
 pub struct Repo {
     pub main_clone: PathBuf,
     pub source: PathBuf,
@@ -222,12 +228,6 @@ impl Repo {
             &["rev-parse", "--verify", "--quiet", reference],
         )
         .is_ok()
-    }
-
-    pub fn is_dirty(&self, worktree: &Path) -> bool {
-        run_git(worktree, &["status", "--porcelain"])
-            .map(|out| !out.trim().is_empty())
-            .unwrap_or(false)
     }
 
     pub fn add_worktree(&self, dir: &Path, branch: &str, base: &str) -> Result<()> {

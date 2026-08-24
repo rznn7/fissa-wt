@@ -16,6 +16,7 @@ use crate::components::list::{ListComponent, Row};
 use crate::components::progress::ProgressComponent;
 use crate::components::{Component, KeyEventResponse};
 use crate::create;
+use crate::dirty;
 use crate::git::{self, Repo};
 use crate::node;
 use crate::shell;
@@ -48,7 +49,7 @@ pub fn build_rows(repo: &Repo) -> Result<Vec<Row>> {
                 .branch
                 .clone()
                 .unwrap_or_else(|| String::from("(detached)")),
-            dirty: repo.is_dirty(&entry.path),
+            dirty: None,
             path: entry.path,
         });
     }
@@ -106,6 +107,7 @@ pub struct App {
     form: Option<CreateForm>,
     progress: Option<ProgressComponent>,
     receiver: Option<Receiver<create::Progress>>,
+    dirty: Option<Receiver<dirty::Report>>,
     screen: Screen,
     created: Option<PathBuf>,
     chosen: Option<PathBuf>,
@@ -115,12 +117,14 @@ pub struct App {
 impl App {
     pub fn new(repo: Repo) -> Result<App> {
         let list = make_list(&repo)?;
+        let dirty = Some(dirty::spawn(list.paths()));
         Ok(App {
             repo,
             list,
             form: None,
             progress: None,
             receiver: None,
+            dirty,
             screen: Screen::List,
             created: None,
             chosen: None,
@@ -130,6 +134,7 @@ impl App {
 
     pub fn run(mut self, terminal: &mut Term) -> Result<Option<PathBuf>> {
         while !self.quit {
+            self.drain_dirty();
             self.drain_progress();
             if let Some(progress) = self.progress.as_mut() {
                 progress.tick();
@@ -288,6 +293,24 @@ impl App {
         Ok(())
     }
 
+    /// The dirty markers are cosmetic, so the list draws without them and the
+    /// scan streams them in rather than holding up the first frame.
+    fn drain_dirty(&mut self) {
+        let Some(receiver) = self.dirty.as_ref() else {
+            return;
+        };
+        loop {
+            match receiver.try_recv() {
+                Ok(report) => self.list.set_dirty(&report.path, report.dirty),
+                Err(mpsc::TryRecvError::Empty) => return,
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    self.dirty = None;
+                    return;
+                }
+            }
+        }
+    }
+
     fn drain_progress(&mut self) {
         let Some(receiver) = self.receiver.as_ref() else {
             return;
@@ -304,6 +327,7 @@ impl App {
         self.receiver = None;
         self.progress = None;
         self.list = make_list(&self.repo)?;
+        self.dirty = Some(dirty::spawn(self.list.paths()));
         self.screen = Screen::List;
         Ok(())
     }
@@ -501,6 +525,21 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let fresh = tmp.path().join("spectra-x");
         assert_eq!(preflight(&fresh, false), None);
+    }
+
+    #[test]
+    fn test_build_rows_leaves_the_dirty_state_unknown() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("main");
+        std::fs::create_dir_all(&root).unwrap();
+        let repo = repo_with_a_second_worktree(&root);
+        std::fs::write(root.join("scratch.txt"), "untracked").unwrap();
+
+        let rows = build_rows(&repo).unwrap();
+        assert!(
+            rows.iter().all(|row| row.dirty.is_none()),
+            "startup must not pay for a git status per worktree"
+        );
     }
 
     #[test]

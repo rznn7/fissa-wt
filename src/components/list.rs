@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind};
 use ratatui::Frame;
@@ -12,7 +12,8 @@ use crate::components::{Component, KeyEventResponse, fit_tail};
 pub struct Row {
     pub label: String,
     pub branch: String,
-    pub dirty: bool,
+    /// `None` until the background scan reports on this worktree.
+    pub dirty: Option<bool>,
     pub path: PathBuf,
 }
 
@@ -42,6 +43,16 @@ impl ListComponent {
         };
         component.refilter();
         component
+    }
+
+    pub fn paths(&self) -> Vec<PathBuf> {
+        self.rows.iter().map(|row| row.path.clone()).collect()
+    }
+
+    pub fn set_dirty(&mut self, path: &Path, dirty: bool) {
+        if let Some(row) = self.rows.iter_mut().find(|row| row.path == path) {
+            row.dirty = Some(dirty);
+        }
     }
 
     pub fn selected_path(&self) -> Option<PathBuf> {
@@ -154,7 +165,7 @@ impl Component for ListComponent {
             .iter()
             .filter_map(|index| self.rows.get(*index))
             .map(|row| {
-                let dirty = if row.dirty { "●" } else { " " };
+                let dirty = if row.dirty == Some(true) { "●" } else { " " };
                 let nested = row.label.contains('/');
                 let label = Span::from(format!(
                     "{:<label_width$} ",
@@ -236,16 +247,24 @@ mod tests {
             Row {
                 label: String::from("spectra"),
                 branch: String::from("develop"),
-                dirty: false,
+                dirty: Some(false),
                 path: PathBuf::from("/w/spectra"),
             },
             Row {
                 label: String::from("spectra-ter"),
                 branch: String::from("ter"),
-                dirty: true,
+                dirty: Some(true),
                 path: PathBuf::from("/w/spectra-ter"),
             },
         ]
+    }
+
+    fn unscanned_component() -> ListComponent {
+        let rows = rows()
+            .into_iter()
+            .map(|row| Row { dirty: None, ..row })
+            .collect();
+        ListComponent::new(String::from("spectra"), rows, true)
     }
 
     fn component(shell_init: bool) -> ListComponent {
@@ -376,6 +395,52 @@ mod tests {
     }
 
     #[test]
+    fn test_rows_start_with_an_unknown_dirty_state() {
+        let component = ListComponent::new(
+            String::from("spectra"),
+            vec![Row {
+                label: String::from("spectra"),
+                branch: String::from("develop"),
+                dirty: None,
+                path: PathBuf::from("/w/spectra"),
+            }],
+            true,
+        );
+        assert_eq!(component.rows[0].dirty, None);
+    }
+
+    #[test]
+    fn test_unknown_dirty_state_renders_no_marker() {
+        let mut component = ListComponent::new(
+            String::from("spectra"),
+            vec![Row {
+                label: String::from("spectra"),
+                branch: String::from("develop"),
+                dirty: None,
+                path: PathBuf::from("/w/spectra"),
+            }],
+            true,
+        );
+        let text = dump(&mut component);
+        assert!(!text.contains('\u{25cf}'), "{text}");
+    }
+
+    #[test]
+    fn test_set_dirty_marks_the_row_with_the_matching_path() {
+        let mut component = unscanned_component();
+        component.set_dirty(Path::new("/w/spectra"), true);
+        assert_eq!(component.rows[0].dirty, Some(true));
+        assert_eq!(component.rows[1].dirty, None);
+    }
+
+    #[test]
+    fn test_set_dirty_ignores_a_path_that_is_not_listed() {
+        let mut component = unscanned_component();
+        component.set_dirty(Path::new("/w/nowhere"), true);
+        assert!(component.rows.iter().all(|row| row.dirty.is_none()));
+    }
+
+    #[test]
     fn test_render_without_shell_init_shows_setup_hint() {
         let text = dump(&mut component(false));
         assert!(text.contains("needs shell init"), "{text}");
@@ -413,13 +478,13 @@ mod tests {
             Row {
                 label: String::from(".claude/worktrees/input-button-counter"),
                 branch: String::from("BRANCH-A"),
-                dirty: false,
+                dirty: None,
                 path: PathBuf::from("/w/a"),
             },
             Row {
                 label: String::from(".claude/worktrees/input-collapsible-container"),
                 branch: String::from("BRANCH-B"),
-                dirty: false,
+                dirty: None,
                 path: PathBuf::from("/w/b"),
             },
         ];
