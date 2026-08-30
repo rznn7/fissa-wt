@@ -70,7 +70,24 @@ pub fn load(source_root: &Path) -> Result<Vec<PathBuf>> {
 
 pub fn copy_file(source_root: &Path, dest_root: &Path, rel: &Path) -> Result<String> {
     let source = source_root.join(rel);
+    let Ok(meta) = std::fs::symlink_metadata(&source) else {
+        return Ok(String::from("skipped (not in the source)"));
+    };
+    if meta.file_type().is_symlink() {
+        return Ok(String::from("skipped (symlink)"));
+    }
+    if !meta.is_file() {
+        return Ok(String::from("skipped (not a regular file)"));
+    }
+
     let dest = dest_root.join(rel);
+    if std::fs::symlink_metadata(&dest).is_ok() {
+        return Ok(String::from("skipped (already in the worktree)"));
+    }
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("could not create {}", parent.display()))?;
+    }
 
     let bytes = std::fs::copy(&source, &dest)
         .with_context(|| format!("could not copy {}", rel.display()))?;
@@ -206,5 +223,91 @@ mod tests {
             "TOKEN=1"
         );
         assert!(detail.starts_with("copied"), "{detail}");
+    }
+
+    #[test]
+    fn test_copy_file_skips_a_source_that_does_not_exist() {
+        let source = tempfile::tempdir().unwrap();
+        let dest = tempfile::tempdir().unwrap();
+
+        let detail = copy_file(source.path(), dest.path(), Path::new(".env")).unwrap();
+
+        assert_eq!(detail, "skipped (not in the source)");
+        assert!(!dest.path().join(".env").exists());
+    }
+
+    #[test]
+    fn test_copy_file_leaves_a_destination_that_already_exists() {
+        let source = tempfile::tempdir().unwrap();
+        let dest = tempfile::tempdir().unwrap();
+        std::fs::write(source.path().join(".env"), "from source").unwrap();
+        std::fs::write(dest.path().join(".env"), "already here").unwrap();
+
+        let detail = copy_file(source.path(), dest.path(), Path::new(".env")).unwrap();
+
+        assert_eq!(detail, "skipped (already in the worktree)");
+        assert_eq!(
+            std::fs::read_to_string(dest.path().join(".env")).unwrap(),
+            "already here"
+        );
+    }
+
+    #[test]
+    fn test_copy_file_skips_a_symlink_without_following_it() {
+        let source = tempfile::tempdir().unwrap();
+        let dest = tempfile::tempdir().unwrap();
+        let secret = source.path().join("secret");
+        std::fs::write(&secret, "not yours").unwrap();
+        std::os::unix::fs::symlink(&secret, source.path().join(".env")).unwrap();
+
+        let detail = copy_file(source.path(), dest.path(), Path::new(".env")).unwrap();
+
+        assert_eq!(detail, "skipped (symlink)");
+        assert!(!dest.path().join(".env").exists());
+    }
+
+    #[test]
+    fn test_copy_file_skips_a_directory_standing_where_a_file_was_declared() {
+        let source = tempfile::tempdir().unwrap();
+        let dest = tempfile::tempdir().unwrap();
+        std::fs::create_dir(source.path().join(".env")).unwrap();
+
+        let detail = copy_file(source.path(), dest.path(), Path::new(".env")).unwrap();
+
+        assert_eq!(detail, "skipped (not a regular file)");
+    }
+
+    #[test]
+    fn test_copy_file_creates_a_parent_the_worktree_does_not_have() {
+        let source = tempfile::tempdir().unwrap();
+        let dest = tempfile::tempdir().unwrap();
+        std::fs::create_dir(source.path().join("config")).unwrap();
+        std::fs::write(source.path().join("config/local.yml"), "k: v").unwrap();
+
+        copy_file(source.path(), dest.path(), Path::new("config/local.yml")).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(dest.path().join("config/local.yml")).unwrap(),
+            "k: v"
+        );
+    }
+
+    #[test]
+    fn test_copy_file_preserves_the_permissions_of_a_private_file() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let source = tempfile::tempdir().unwrap();
+        let dest = tempfile::tempdir().unwrap();
+        let path = source.path().join(".env");
+        std::fs::write(&path, "TOKEN=1").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+        copy_file(source.path(), dest.path(), Path::new(".env")).unwrap();
+
+        let mode = std::fs::metadata(dest.path().join(".env"))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o600);
     }
 }
