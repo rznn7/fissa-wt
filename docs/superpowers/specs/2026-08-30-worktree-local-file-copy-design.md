@@ -127,7 +127,9 @@ for.
 
 The skip decision needs the source root, which `skip_reason` does not receive.
 Copy skips are therefore decided inside the action, returning `Ok` with the
-detail string that `run_step` already propagates. `skip_reason` is unchanged.
+detail string that `run_step` already propagates. `skip_reason` gains the new
+variant in its early-return arm, because its match over `Action` is exhaustive,
+but none of its logic changes.
 
 Destination parents get `create_dir_all`, since `config/` may not exist in a
 fresh worktree when it holds nothing tracked. `std::fs::copy` preserves Unix
