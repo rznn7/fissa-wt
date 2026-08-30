@@ -675,7 +675,7 @@ mod tests {
             tmp.path(),
             &["init", "-q", "--bare", remote.to_str().unwrap()],
         );
-        let repo = repo_with_a_second_worktree(&root);
+        repo_with_a_second_worktree(&root);
         run(
             &root,
             &["remote", "add", "gitlab", remote.to_str().unwrap()],
