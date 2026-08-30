@@ -32,6 +32,11 @@ CONFIGURATION:
 
         default_mode = \"list\"   # list | create
         icons = \"nerd\"          # nerd | ascii
+
+    .fissa.toml at the repository root, committed
+
+        [worktree]
+        copy = [\".env\"]   # literal file paths, copied into new worktrees
 ";
 
 fn unknown_flag(args: &[String]) -> Option<&str> {

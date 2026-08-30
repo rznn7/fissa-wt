@@ -14,6 +14,8 @@ straight into it.
 - **Branch cleanup**: optionally drop the local branch, the remote one, or both.
 - **Submodules**, in repos that have them, are initialised recursively on create,
   before any install runs.
+- **Declared local files**: a repo's `.fissa.toml` names the gitignored files a
+  worktree needs — `.env` and friends — and each new worktree gets them.
 - **npm, pnpm, yarn, bun and deno**: new worktrees install with whichever manager
   each lockfile names, at any depth, so they build on arrival.
 
@@ -53,6 +55,19 @@ icons = "nerd"          # nerd | ascii
 `create` opens straight on the creation form; `Esc` still returns to the list.
 `ascii` swaps the Nerd Font glyphs for plain characters, for terminals without a
 patched font.
+
+A repository can also declare, in a committed `.fissa.toml` at its root, the
+gitignored files every worktree needs:
+
+```toml
+[worktree]
+copy = [".env", "config/secrets.local.yml"]
+```
+
+Each entry is a literal path to a single file, relative to the repository root.
+Patterns, directories and paths leaving the root are refused. A file that is
+missing, is a symlink, or already exists in the new worktree is skipped rather
+than copied.
 
 ## Development
 
