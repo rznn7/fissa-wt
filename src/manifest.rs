@@ -1,6 +1,6 @@
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow};
 use serde::Deserialize;
 
 #[derive(Debug, Default, Deserialize)]
@@ -17,7 +17,46 @@ struct Worktree {
 
 pub fn parse(text: &str) -> Result<Vec<PathBuf>> {
     let manifest: Manifest = toml::from_str(text)?;
-    Ok(manifest.worktree.copy.iter().map(PathBuf::from).collect())
+    manifest
+        .worktree
+        .copy
+        .iter()
+        .map(String::as_str)
+        .map(validate)
+        .collect()
+}
+
+fn validate(entry: &str) -> Result<PathBuf> {
+    if entry.is_empty() {
+        return Err(anyhow!("a copy entry is empty"));
+    }
+    if entry.contains(['*', '?', '[']) {
+        return Err(anyhow!(
+            "copy entry '{entry}' looks like a pattern; only literal file paths are supported"
+        ));
+    }
+    if entry.ends_with('/') {
+        return Err(anyhow!(
+            "copy entry '{entry}' is a directory; only files are supported"
+        ));
+    }
+
+    let path = PathBuf::from(entry);
+    if path.is_absolute() {
+        return Err(anyhow!(
+            "copy entry '{entry}' must be relative to the repository root"
+        ));
+    }
+    if path
+        .components()
+        .any(|c| !matches!(c, Component::Normal(_)))
+    {
+        return Err(anyhow!(
+            "copy entry '{entry}' must not leave the repository root"
+        ));
+    }
+
+    Ok(path)
 }
 
 /// A missing manifest is not an error: it is how most repositories run.
@@ -55,6 +94,53 @@ fn human_bytes(bytes: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn rejection(entry: &str) -> String {
+        let text = format!("[worktree]\ncopy = [\"{entry}\"]");
+        parse(&text)
+            .expect_err("expected the entry to be rejected")
+            .to_string()
+    }
+
+    #[test]
+    fn test_parse_rejects_an_absolute_path() {
+        assert!(rejection("/etc/passwd").contains("/etc/passwd"));
+    }
+
+    #[test]
+    fn test_parse_rejects_a_path_that_climbs_out_of_the_repository() {
+        assert!(rejection("../../.ssh/id_rsa").contains("id_rsa"));
+    }
+
+    #[test]
+    fn test_parse_rejects_a_single_dot_component() {
+        assert!(rejection("./.env").contains(".env"));
+    }
+
+    #[test]
+    fn test_parse_rejects_a_wildcard() {
+        let message = rejection(".env*");
+        assert!(message.contains("literal"), "{message}");
+    }
+
+    #[test]
+    fn test_parse_rejects_a_directory() {
+        let message = rejection("config/");
+        assert!(message.contains("file"), "{message}");
+    }
+
+    #[test]
+    fn test_parse_rejects_an_empty_entry() {
+        assert!(parse("[worktree]\ncopy = [\"\"]").is_err());
+    }
+
+    #[test]
+    fn test_parse_keeps_accepting_a_nested_literal_path() {
+        assert_eq!(
+            parse("[worktree]\ncopy = [\"config/secrets.local.yml\"]").unwrap(),
+            vec![PathBuf::from("config/secrets.local.yml")]
+        );
+    }
 
     #[test]
     fn test_parse_empty_text_declares_nothing() {
