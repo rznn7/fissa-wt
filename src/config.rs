@@ -11,10 +11,19 @@ pub enum Mode {
     Create,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Icons {
+    #[default]
+    Nerd,
+    Ascii,
+}
+
 #[derive(Debug, Clone, Copy, Default, Deserialize)]
 #[serde(default)]
 pub struct Config {
     pub default_mode: Mode,
+    pub icons: Icons,
 }
 
 pub fn parse(text: &str) -> Result<Config> {
@@ -73,6 +82,21 @@ mod tests {
     #[test]
     fn test_parse_ignores_keys_it_does_not_know() {
         assert_eq!(parse("future_key = 3").unwrap().default_mode, Mode::List);
+    }
+
+    #[test]
+    fn test_parse_defaults_to_nerd_icons() {
+        assert_eq!(parse("").unwrap().icons, Icons::Nerd);
+    }
+
+    #[test]
+    fn test_parse_reads_ascii_icons() {
+        assert_eq!(parse("icons = \"ascii\"").unwrap().icons, Icons::Ascii);
+    }
+
+    #[test]
+    fn test_parse_rejects_an_unknown_icon_set() {
+        assert!(parse("icons = \"emoji\"").is_err());
     }
 
     #[test]

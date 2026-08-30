@@ -30,6 +30,7 @@ CONFIGURATION:
     ~/.config/fissa/config.toml (or $XDG_CONFIG_HOME/fissa/config.toml)
 
         default_mode = \"list\"   # list | create
+        icons = \"nerd\"          # nerd | ascii
 ";
 
 fn unknown_flag(args: &[String]) -> Option<&str> {
@@ -67,6 +68,7 @@ fn main() -> anyhow::Result<()> {
     }));
 
     let config = config::load()?;
+    components::theme::install(config.icons);
     let repo = git::Repo::discover(&std::env::current_dir()?)?;
     let mut terminal = app::init_terminal()?;
     let result = app::App::new(repo, config).and_then(|app| app.run(&mut terminal));

@@ -115,13 +115,13 @@ impl ListComponent {
     fn search_bar(&self) -> Option<String> {
         self.editing
             .as_ref()
-            .map(|input| format!(" {} {}", theme::SEARCH, input.value()))
+            .map(|input| format!(" {} {}", theme::search(), input.value()))
     }
 
     /// Where the caret sits in the search bar, as a column offset from the footer.
     fn search_cursor_offset(&self) -> Option<usize> {
         let input = self.editing.as_ref()?;
-        let prefix = format!(" {} ", theme::SEARCH).chars().count();
+        let prefix = format!(" {} ", theme::search()).chars().count();
         Some(prefix + input.cursor())
     }
 
@@ -241,7 +241,7 @@ impl Component for ListComponent {
             .filter_map(|(slot, index)| Some((slot, self.rows.get(*index)?)))
             .map(|(slot, row)| {
                 let nested = row.label.contains('/');
-                let icon = Span::from(format!("{} ", theme::WORKTREE));
+                let icon = Span::from(format!("{} ", theme::worktree()));
                 let icon = if nested { icon.dim() } else { icon };
                 let label = Span::from(format!(
                     "{:<label_width$} ",
@@ -250,13 +250,13 @@ impl Component for ListComponent {
                 let label = if nested { label.dim() } else { label };
                 let spans = vec![
                     if row.dirty == Some(true) {
-                        Span::styled(format!("{} ", theme::DIRTY), theme::dirty())
+                        Span::styled(format!("{} ", theme::dirty_icon()), theme::dirty())
                     } else {
                         Span::from("  ")
                     },
                     icon,
                     label,
-                    Span::from(format!("{} ", theme::BRANCH)).dim(),
+                    Span::from(format!("{} ", theme::branch())).dim(),
                     Span::from(format!(
                         "{:<branch_width$}",
                         fit_tail(row.branch_or_detached(), branch_width)
@@ -277,7 +277,7 @@ impl Component for ListComponent {
         ];
         if self.editing.is_none() && !self.query.is_empty() {
             title.push(Span::styled(
-                format!("  {} {}", theme::SEARCH, self.query),
+                format!("  {} {}", theme::search(), self.query),
                 theme::accent(),
             ));
         }
@@ -504,7 +504,7 @@ mod tests {
         let text = dump(&mut component(true));
         assert!(text.contains("spectra"), "{text}");
         assert!(text.contains("develop"), "{text}");
-        assert!(text.contains(theme::DIRTY), "{text}");
+        assert!(text.contains(theme::dirty_icon()), "{text}");
         assert!(text.contains("Cd: <enter>"), "{text}");
     }
 
@@ -792,7 +792,7 @@ mod tests {
         let mut component = component(true);
         search(&mut component, "ter");
         let text = dump(&mut component);
-        assert!(text.contains(&format!("{} ter", theme::SEARCH)), "{text}");
+        assert!(text.contains(&format!("{} ter", theme::search())), "{text}");
         assert!(text.contains("Cancel: <esc>"), "{text}");
         assert!(!text.contains("Quit: q"), "{text}");
     }
@@ -846,7 +846,7 @@ mod tests {
         component.handle_event_key(key(KeyCode::Enter));
         let text = dump(&mut component);
         assert!(
-            text.contains(&format!("spectra  {} ter", theme::SEARCH)),
+            text.contains(&format!("spectra  {} ter", theme::search())),
             "{text}"
         );
     }
@@ -963,8 +963,8 @@ mod tests {
     #[test]
     fn test_render_marks_each_row_with_a_worktree_and_branch_icon() {
         let text = dump(&mut component(true));
-        assert!(text.contains(theme::WORKTREE), "{text}");
-        assert!(text.contains(theme::BRANCH), "{text}");
+        assert!(text.contains(theme::worktree()), "{text}");
+        assert!(text.contains(theme::branch()), "{text}");
     }
 
     #[test]
@@ -973,7 +973,7 @@ mod tests {
         assert!(!text.contains("link"), "{text}");
         assert!(!text.contains("own"), "{text}");
         assert!(text.contains("develop"), "{text}");
-        assert!(text.contains(theme::DIRTY), "{text}");
+        assert!(text.contains(theme::dirty_icon()), "{text}");
     }
 }
 

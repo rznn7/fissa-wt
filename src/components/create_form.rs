@@ -236,7 +236,7 @@ impl Component for CreateForm {
             Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(area);
 
         let block = Block::bordered().title(Line::from(vec![
-            Span::from(format!(" {} ", theme::NEW)),
+            Span::from(format!(" {} ", theme::new())),
             Span::styled("new worktree", theme::title()),
             Span::from(" "),
         ]));
@@ -252,7 +252,7 @@ impl Component for CreateForm {
 
         let marker = |field: Field| {
             if self.focus == field {
-                theme::FOCUS
+                theme::focus()
             } else {
                 " "
             }
@@ -323,7 +323,7 @@ impl Component for CreateForm {
 
         if let Some(message) = &self.error {
             Paragraph::new(Line::styled(
-                format!("  {} {message}", theme::WARN),
+                format!("  {} {message}", theme::warn()),
                 theme::danger(),
             ))
             .render(error, frame.buffer_mut());
@@ -639,13 +639,13 @@ mod tests {
         assert!(text.contains("spectra-spe-11667"), "{text}");
         assert!(text.contains("directory already exists"), "{text}");
         assert!(text.contains("install"), "{text}");
-        assert!(text.contains(theme::WARN), "{text}");
+        assert!(text.contains(theme::warn()), "{text}");
     }
 
     #[test]
     fn test_render_marks_the_focused_field_with_an_icon() {
         let text = dump(&mut form());
-        assert!(text.contains(&format!("{} slug", theme::FOCUS)), "{text}");
+        assert!(text.contains(&format!("{} slug", theme::focus())), "{text}");
     }
 
     fn ctrl(code: KeyCode) -> KeyEvent {

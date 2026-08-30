@@ -45,9 +45,12 @@ Optional, at `~/.config/fissa/config.toml` (or `$XDG_CONFIG_HOME/fissa/config.to
 
 ```toml
 default_mode = "list"   # list | create
+icons = "nerd"          # nerd | ascii
 ```
 
 `create` opens straight on the creation form; `Esc` still returns to the list.
+`ascii` swaps the Nerd Font glyphs for plain characters, for terminals without a
+patched font.
 
 ## Development
 

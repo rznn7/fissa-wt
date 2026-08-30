@@ -481,6 +481,7 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         let config = Config {
             default_mode: Mode::Create,
+            ..Config::default()
         };
         let app = App::new(repo_with_a_second_worktree(&root), config).unwrap();
         assert!(matches!(app.screen, Screen::Create));
@@ -494,6 +495,7 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         let config = Config {
             default_mode: Mode::Create,
+            ..Config::default()
         };
         let mut app = App::new(repo_with_a_second_worktree(&root), config).unwrap();
         press(&mut app, KeyCode::Esc);

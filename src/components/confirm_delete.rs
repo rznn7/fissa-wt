@@ -78,15 +78,15 @@ impl ConfirmDelete {
     fn title(&self) -> String {
         let count = self.entries.len();
         let noun = if count == 1 { "worktree" } else { "worktrees" };
-        format!(" {} delete {count} {noun} ", theme::TRASH)
+        format!(" {} delete {count} {noun} ", theme::trash())
     }
 }
 
 fn checkbox(checked: bool) -> &'static str {
     if checked {
-        theme::CHECKED
+        theme::checked()
     } else {
-        theme::UNCHECKED
+        theme::unchecked()
     }
 }
 
@@ -117,7 +117,7 @@ impl Component for ConfirmDelete {
                     None => String::new(),
                 };
                 let marker = if entry.dirty {
-                    Span::styled(format!(" {} ", theme::DIRTY), theme::dirty())
+                    Span::styled(format!(" {} ", theme::dirty_icon()), theme::dirty())
                 } else {
                     Span::from("   ")
                 };
@@ -126,7 +126,7 @@ impl Component for ConfirmDelete {
                     Span::from(format!(
                         "{:<label_width$}  {} {}{remote}",
                         fit_tail(&entry.label, label_width),
-                        theme::BRANCH,
+                        theme::branch(),
                         entry.branch.as_deref().unwrap_or("(detached)"),
                     )),
                 ])
@@ -150,7 +150,7 @@ impl Component for ConfirmDelete {
             lines.push(Line::styled(
                 format!(
                     " {} deleting a remote branch is visible to everyone on the repo",
-                    theme::WARN
+                    theme::warn()
                 ),
                 theme::danger(),
             ));
@@ -159,7 +159,7 @@ impl Component for ConfirmDelete {
             lines.push(
                 Line::from(format!(
                     " {} has uncommitted changes — enter refuses it, f forces it",
-                    theme::DIRTY
+                    theme::dirty_icon()
                 ))
                 .dim(),
             );
@@ -341,7 +341,7 @@ mod tests {
     #[test]
     fn test_render_marks_a_worktree_with_uncommitted_changes() {
         let text = dump(&mut component());
-        assert!(text.contains(theme::DIRTY), "{text}");
+        assert!(text.contains(theme::dirty_icon()), "{text}");
     }
 
     #[test]
@@ -355,14 +355,14 @@ mod tests {
         let mut component = ConfirmDelete::new(vec![entry("one", None, false)]);
         let text = dump(&mut component);
         assert!(!text.contains("uncommitted"), "{text}");
-        assert!(!text.contains(theme::DIRTY), "{text}");
+        assert!(!text.contains(theme::dirty_icon()), "{text}");
     }
 
     #[test]
     fn test_render_shows_the_branch_toggle_unchecked() {
         let text = dump(&mut component());
         assert!(
-            text.contains(&format!("{} delete branch too", theme::UNCHECKED)),
+            text.contains(&format!("{} delete branch too", theme::unchecked())),
             "{text}"
         );
     }
@@ -373,7 +373,7 @@ mod tests {
         component.handle_event_key(key(KeyCode::Char(' ')));
         let text = dump(&mut component);
         assert!(
-            text.contains(&format!("{} delete branch too", theme::CHECKED)),
+            text.contains(&format!("{} delete branch too", theme::checked())),
             "{text}"
         );
     }
@@ -428,7 +428,7 @@ mod tests {
         assert!(
             text.contains(&format!(
                 "{} delete the remote branch too",
-                theme::UNCHECKED
+                theme::unchecked()
             )),
             "{text}"
         );
@@ -440,7 +440,10 @@ mod tests {
         component.handle_event_key(key(KeyCode::Char('r')));
         let text = dump(&mut component);
         assert!(
-            text.contains(&format!("{} delete the remote branch too", theme::CHECKED)),
+            text.contains(&format!(
+                "{} delete the remote branch too",
+                theme::checked()
+            )),
             "{text}"
         );
     }

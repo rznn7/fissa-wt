@@ -136,10 +136,10 @@ impl Component for ProgressComponent {
             .iter()
             .enumerate()
             .map(|(index, label)| {
-                let spinner = theme::SPINNER[self.frame % theme::SPINNER.len()];
+                let spinner = theme::spinner()[self.frame % theme::spinner().len()];
                 let (marker, style) = match self.states.get(index) {
-                    Some(StepState::Done) => (String::from(theme::DONE), theme::ok()),
-                    Some(StepState::Failed) => (String::from(theme::FAILED), theme::danger()),
+                    Some(StepState::Done) => (String::from(theme::done()), theme::ok()),
+                    Some(StepState::Failed) => (String::from(theme::failed()), theme::danger()),
                     Some(StepState::Running) => (spinner.to_string(), theme::accent()),
                     _ => (String::from(" "), Style::new()),
                 };
@@ -251,7 +251,7 @@ mod tests {
         let mut component = component();
         component.apply(Progress::Running(1));
         let first = marker(&mut component, 1);
-        for _ in 0..theme::SPINNER.len() {
+        for _ in 0..theme::spinner().len() {
             component.tick();
         }
         assert_eq!(marker(&mut component, 1), first);
@@ -262,7 +262,7 @@ mod tests {
         let mut component = component();
         component.apply(Progress::Ok(1, String::from("installed")));
         component.tick();
-        assert_eq!(marker(&mut component, 1), theme::DONE);
+        assert_eq!(marker(&mut component, 1), theme::done());
     }
 
     #[test]
@@ -274,7 +274,7 @@ mod tests {
         assert!(text.contains("feature/spe-11667"), "{text}");
         assert!(text.contains("created"), "{text}");
         assert!(text.contains("npm ci  app"), "{text}");
-        assert!(text.contains(theme::DONE), "{text}");
+        assert!(text.contains(theme::done()), "{text}");
     }
 
     #[test]
@@ -374,6 +374,6 @@ mod tests {
         component.apply(Progress::Failed(0, String::from("branch exists")));
         let text = dump(&mut component);
         assert!(text.contains("branch exists"), "{text}");
-        assert!(text.contains(theme::FAILED), "{text}");
+        assert!(text.contains(theme::failed()), "{text}");
     }
 }
