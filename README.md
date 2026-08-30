@@ -39,6 +39,16 @@ eval "$(fissa init zsh)"
 eval "$(fissa init bash)"
 ```
 
+## Configuration
+
+Optional, at `~/.config/fissa/config.toml` (or `$XDG_CONFIG_HOME/fissa/config.toml`):
+
+```toml
+default_mode = "list"   # list | create
+```
+
+`create` opens straight on the creation form; `Esc` still returns to the list.
+
 ## Development
 
 ```sh

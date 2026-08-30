@@ -16,6 +16,7 @@ use crate::components::create_form::CreateForm;
 use crate::components::list::{ListComponent, Row};
 use crate::components::progress::{Completion, Progress, ProgressComponent};
 use crate::components::{Component, KeyEventResponse};
+use crate::config::{Config, Mode};
 use crate::create;
 use crate::dirty;
 use crate::git::{self, Repo};
@@ -119,10 +120,10 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(repo: Repo) -> Result<App> {
+    pub fn new(repo: Repo, config: Config) -> Result<App> {
         let list = make_list(&repo)?;
         let dirty = Some(dirty::spawn(list.paths()));
-        Ok(App {
+        let mut app = App {
             repo,
             list,
             form: None,
@@ -135,7 +136,11 @@ impl App {
             created: None,
             chosen: None,
             quit: false,
-        })
+        };
+        if config.default_mode == Mode::Create {
+            app.open_form();
+        }
+        Ok(app)
     }
 
     pub fn run(mut self, terminal: &mut Term) -> Result<Option<PathBuf>> {
@@ -466,7 +471,34 @@ mod tests {
     fn app_on_the_list_screen(tmp: &tempfile::TempDir) -> App {
         let root = tmp.path().join("main");
         std::fs::create_dir_all(&root).unwrap();
-        App::new(repo_with_a_second_worktree(&root)).unwrap()
+        App::new(repo_with_a_second_worktree(&root), Config::default()).unwrap()
+    }
+
+    #[test]
+    fn test_the_create_mode_config_opens_on_the_form() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("main");
+        std::fs::create_dir_all(&root).unwrap();
+        let config = Config {
+            default_mode: Mode::Create,
+        };
+        let app = App::new(repo_with_a_second_worktree(&root), config).unwrap();
+        assert!(matches!(app.screen, Screen::Create));
+        assert!(app.form.is_some());
+    }
+
+    #[test]
+    fn test_esc_from_a_form_opened_by_config_still_lands_on_the_list() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("main");
+        std::fs::create_dir_all(&root).unwrap();
+        let config = Config {
+            default_mode: Mode::Create,
+        };
+        let mut app = App::new(repo_with_a_second_worktree(&root), config).unwrap();
+        press(&mut app, KeyCode::Esc);
+        assert!(matches!(app.screen, Screen::List));
+        assert!(!app.quit);
     }
 
     fn press(app: &mut App, code: KeyCode) {
@@ -647,7 +679,7 @@ mod tests {
             &["remote", "add", "gitlab", remote.to_str().unwrap()],
         );
         run(&root, &["push", "-q", "-u", "gitlab", "main", "side"]);
-        App::new(Repo::discover(&root).unwrap()).unwrap()
+        App::new(Repo::discover(&root).unwrap(), Config::default()).unwrap()
     }
 
     fn remote_heads(tmp: &tempfile::TempDir) -> String {

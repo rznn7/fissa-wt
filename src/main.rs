@@ -1,5 +1,6 @@
 mod app;
 mod components;
+mod config;
 mod create;
 mod dirty;
 mod git;
@@ -24,6 +25,11 @@ SETUP:
         eval \"$(fissa init zsh)\"
 
     Without it everything works except landing in the selected worktree.
+
+CONFIGURATION:
+    ~/.config/fissa/config.toml (or $XDG_CONFIG_HOME/fissa/config.toml)
+
+        default_mode = \"list\"   # list | create
 ";
 
 fn unknown_flag(args: &[String]) -> Option<&str> {
@@ -60,9 +66,10 @@ fn main() -> anyhow::Result<()> {
         previous_hook(info);
     }));
 
+    let config = config::load()?;
     let repo = git::Repo::discover(&std::env::current_dir()?)?;
     let mut terminal = app::init_terminal()?;
-    let result = app::App::new(repo).and_then(|app| app.run(&mut terminal));
+    let result = app::App::new(repo, config).and_then(|app| app.run(&mut terminal));
     app::restore_terminal()?;
 
     if let Some(path) = result? {
