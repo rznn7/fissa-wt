@@ -156,6 +156,12 @@ pub fn is_dirty(worktree: &Path) -> bool {
         .unwrap_or(false)
 }
 
+/// Runs in the new worktree: `git worktree add` leaves submodule directories
+/// empty, so nothing is checked out until this populates them.
+pub fn init_submodules(worktree: &Path) -> Result<()> {
+    run_git(worktree, &["submodule", "update", "--init", "--recursive"]).map(|_| ())
+}
+
 pub struct Repo {
     pub main_clone: PathBuf,
     pub source: PathBuf,
@@ -191,6 +197,10 @@ impl Repo {
             Some(name) => name.to_string_lossy().to_string(),
             None => String::from("repo"),
         }
+    }
+
+    pub fn has_submodules(&self) -> bool {
+        self.source.join(".gitmodules").exists()
     }
 
     pub fn worktrees(&self) -> Result<Vec<WorktreeEntry>> {
@@ -811,5 +821,88 @@ mod remote_tests {
         let tmp = tempfile::tempdir().unwrap();
         let repo = repo_with_a_named_remote(tmp.path());
         assert!(repo.delete_remote_branch("gitlab", "never-pushed").is_err());
+    }
+}
+
+#[cfg(test)]
+mod submodule_tests {
+    use super::*;
+
+    fn run(cwd: &Path, args: &[&str]) {
+        let status = std::process::Command::new("git")
+            .args(args)
+            .current_dir(cwd)
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {args:?} failed");
+    }
+
+    fn commit(cwd: &Path, message: &str) {
+        run(
+            cwd,
+            &[
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@t",
+                "commit",
+                "-qm",
+                message,
+            ],
+        );
+    }
+
+    fn plain_repo(root: &Path, file: &str) {
+        std::fs::create_dir_all(root).unwrap();
+        run(root, &["init", "--quiet", "-b", "main"]);
+        std::fs::write(root.join(file), "hi").unwrap();
+        run(root, &["add", file]);
+        commit(root, "init");
+    }
+
+    /// A superproject carrying `lib` at `vendor/lib`, plus an empty worktree.
+    fn superproject_with_a_submodule(tmp: &Path) -> (Repo, PathBuf) {
+        plain_repo(&tmp.join("lib"), "lib.txt");
+        let root = tmp.join("super");
+        plain_repo(&root, "README.md");
+        run(
+            &root,
+            &["submodule", "add", "--quiet", "../lib", "vendor/lib"],
+        );
+        commit(&root, "add submodule");
+        run(&root, &["worktree", "add", "-q", "-b", "side", "../side"]);
+        (Repo::discover(&root).unwrap(), tmp.join("side"))
+    }
+
+    #[test]
+    fn test_has_submodules_is_true_for_a_superproject() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (repo, _) = superproject_with_a_submodule(tmp.path());
+        assert!(repo.has_submodules());
+    }
+
+    #[test]
+    fn test_has_submodules_is_false_without_a_gitmodules() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("plain");
+        plain_repo(&root, "README.md");
+        assert!(!Repo::discover(&root).unwrap().has_submodules());
+    }
+
+    #[test]
+    fn test_a_fresh_worktree_leaves_the_submodule_empty_until_it_is_initialised() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (_repo, side) = superproject_with_a_submodule(tmp.path());
+        assert!(!side.join("vendor/lib/lib.txt").exists());
+    }
+
+    #[test]
+    fn test_init_submodules_populates_the_submodule_in_a_fresh_worktree() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (_repo, side) = superproject_with_a_submodule(tmp.path());
+
+        init_submodules(&side).unwrap();
+
+        assert!(side.join("vendor/lib/lib.txt").exists());
     }
 }

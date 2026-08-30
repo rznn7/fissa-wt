@@ -1,0 +1,5 @@
+# The submodule tests build a fixture whose submodule is a local path, and git
+# refuses the `file` transport unless it is allowed. `force = false` keeps a
+# value the environment already set.
+[env]
+GIT_ALLOW_PROTOCOL = { value = "file:git:ssh:https:http", force = false }

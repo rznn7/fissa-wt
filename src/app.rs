@@ -270,6 +270,7 @@ impl App {
             self.repo.prefixes(),
             self.repo.default_base(),
             allowed,
+            self.repo.has_submodules(),
         ));
         self.screen = Screen::Create;
     }
@@ -354,7 +355,13 @@ impl App {
         }
 
         let targets = node::discover_targets(&self.repo.source);
-        let steps = create::plan_steps(&branch, form.base(), form.strategy(), &targets);
+        let steps = create::plan_steps(
+            &branch,
+            form.base(),
+            form.strategy(),
+            form.submodules(),
+            &targets,
+        );
         let labels: Vec<String> = steps.iter().map(|step| step.label.clone()).collect();
 
         let (sender, receiver) = mpsc::channel();

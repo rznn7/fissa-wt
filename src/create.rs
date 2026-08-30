@@ -14,6 +14,7 @@ pub enum Action {
         rel: PathBuf,
         manager: node::Manager,
     },
+    InitSubmodules,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -27,7 +28,13 @@ pub struct Request {
     pub steps: Vec<Step>,
 }
 
-pub fn plan_steps(branch: &str, base: &str, strategy: Strategy, targets: &[Target]) -> Vec<Step> {
+pub fn plan_steps(
+    branch: &str,
+    base: &str,
+    strategy: Strategy,
+    submodules: bool,
+    targets: &[Target],
+) -> Vec<Step> {
     let mut steps = vec![Step {
         label: format!("git worktree add  {branch}"),
         action: Action::AddWorktree {
@@ -35,6 +42,13 @@ pub fn plan_steps(branch: &str, base: &str, strategy: Strategy, targets: &[Targe
             base: base.to_string(),
         },
     }];
+
+    if submodules {
+        steps.push(Step {
+            label: String::from("git submodule update  --init"),
+            action: Action::InitSubmodules,
+        });
+    }
 
     for target in node::targets_for(strategy, targets) {
         let rel = target.rel.clone();
@@ -58,7 +72,7 @@ pub fn plan_steps(branch: &str, base: &str, strategy: Strategy, targets: &[Targe
 
 pub fn skip_reason(dest: &Path, step: &Step) -> Option<&'static str> {
     let rel = match &step.action {
-        Action::AddWorktree { .. } => return None,
+        Action::AddWorktree { .. } | Action::InitSubmodules => return None,
         Action::Install { rel, .. } => rel,
     };
     if dest.join(rel).is_dir() {
@@ -132,6 +146,10 @@ fn run_step(repo_source: &Path, request: &Request, step: &Step) -> anyhow::Resul
             repo.add_worktree(&request.dest, branch, base)?;
             Ok(String::from("created"))
         }
+        Action::InitSubmodules => {
+            crate::git::init_submodules(&request.dest)?;
+            Ok(String::from("initialised"))
+        }
         Action::Install { rel, manager } => {
             let dir = request.dest.join(rel);
             node::install(*manager, &dir)?;
@@ -163,7 +181,7 @@ mod tests {
             rel: PathBuf::from("app"),
             lockfile: Some(node::Manager::Pnpm),
         }];
-        let steps = plan_steps("feature/x", "develop", Strategy::Install, &targets);
+        let steps = plan_steps("feature/x", "develop", Strategy::Install, false, &targets);
         assert_eq!(
             steps[1].action,
             Action::Install {
@@ -179,7 +197,7 @@ mod tests {
             rel: PathBuf::from("app"),
             lockfile: Some(node::Manager::Pnpm),
         }];
-        let steps = plan_steps("feature/x", "develop", Strategy::Install, &targets);
+        let steps = plan_steps("feature/x", "develop", Strategy::Install, false, &targets);
         assert_eq!(steps[1].label, "pnpm install  app");
     }
 
@@ -195,14 +213,14 @@ mod tests {
                 lockfile: Some(node::Manager::Npm),
             },
         ];
-        let steps = plan_steps("feature/x", "develop", Strategy::Install, &targets);
+        let steps = plan_steps("feature/x", "develop", Strategy::Install, false, &targets);
         assert_eq!(steps.len(), 2);
         assert_eq!(steps[1].label, "npm ci  app");
     }
 
     #[test]
     fn test_plan_steps_always_starts_with_the_worktree_add() {
-        let steps = plan_steps("feature/x", "develop", Strategy::None, &targets());
+        let steps = plan_steps("feature/x", "develop", Strategy::None, false, &targets());
         assert_eq!(steps.len(), 1);
         assert!(matches!(steps[0].action, Action::AddWorktree { .. }));
         assert!(steps[0].label.contains("feature/x"));
@@ -210,7 +228,7 @@ mod tests {
 
     #[test]
     fn test_plan_steps_install_covers_every_package() {
-        let steps = plan_steps("feature/x", "develop", Strategy::Install, &targets());
+        let steps = plan_steps("feature/x", "develop", Strategy::Install, false, &targets());
         assert_eq!(steps.len(), 3);
         assert!(matches!(steps[1].action, Action::Install { .. }));
         assert!(matches!(steps[2].action, Action::Install { .. }));
@@ -265,7 +283,7 @@ mod tests {
             rel: PathBuf::new(),
             lockfile: Some(node::Manager::Npm),
         }];
-        let steps = plan_steps("feature/x", "develop", Strategy::Install, &targets);
+        let steps = plan_steps("feature/x", "develop", Strategy::Install, false, &targets);
         assert_eq!(steps[1].label, "npm ci");
     }
 
@@ -377,8 +395,50 @@ mod tests {
     }
 
     #[test]
+    fn test_plan_steps_includes_the_submodule_init_when_asked() {
+        let steps = plan_steps("feature/x", "develop", Strategy::None, true, &targets());
+        assert_eq!(steps.len(), 2);
+        assert_eq!(steps[1].action, Action::InitSubmodules);
+        assert_eq!(steps[1].label, "git submodule update  --init");
+    }
+
+    #[test]
+    fn test_plan_steps_leaves_out_the_submodule_init_when_not_asked() {
+        let steps = plan_steps("feature/x", "develop", Strategy::None, false, &targets());
+        assert!(
+            !steps
+                .iter()
+                .any(|step| step.action == Action::InitSubmodules)
+        );
+    }
+
+    #[test]
+    fn test_plan_steps_puts_the_submodule_init_before_every_install() {
+        let steps = plan_steps("feature/x", "develop", Strategy::Install, true, &targets());
+        let init = steps
+            .iter()
+            .position(|step| step.action == Action::InitSubmodules)
+            .unwrap();
+        let first_install = steps
+            .iter()
+            .position(|step| matches!(step.action, Action::Install { .. }))
+            .unwrap();
+        assert!(init < first_install, "{:?}", steps);
+    }
+
+    #[test]
+    fn test_skip_reason_never_skips_the_submodule_init() {
+        let tmp = tempfile::tempdir().unwrap();
+        let step = Step {
+            label: String::from("git submodule update  --init"),
+            action: Action::InitSubmodules,
+        };
+        assert_eq!(skip_reason(tmp.path(), &step), None);
+    }
+
+    #[test]
     fn test_plan_steps_labels_a_nested_package_with_its_path() {
-        let steps = plan_steps("feature/x", "develop", Strategy::Install, &targets());
+        let steps = plan_steps("feature/x", "develop", Strategy::Install, false, &targets());
         assert_eq!(steps[1].label, "npm ci  app");
         assert_eq!(steps[2].label, "npm ci  tools");
     }

@@ -17,6 +17,7 @@ pub enum Field {
     Prefix,
     Base,
     Deps,
+    Submodules,
 }
 
 pub struct CreateForm {
@@ -27,6 +28,7 @@ pub struct CreateForm {
     base: TextInput,
     allowed: Vec<Strategy>,
     strategy_index: usize,
+    submodules: bool,
     fields: Vec<Field>,
     focus: Field,
     error: Option<String>,
@@ -40,10 +42,14 @@ impl CreateForm {
         prefixes: Vec<String>,
         base: String,
         allowed: Vec<Strategy>,
+        has_submodules: bool,
     ) -> Self {
         let mut fields = vec![Field::Slug, Field::Prefix, Field::Base];
         if allowed.contains(&Strategy::Install) {
             fields.push(Field::Deps);
+        }
+        if has_submodules {
+            fields.push(Field::Submodules);
         }
         Self {
             repo_dir,
@@ -57,6 +63,7 @@ impl CreateForm {
             base: TextInput::new(base),
             allowed,
             strategy_index: 0,
+            submodules: has_submodules,
             fields,
             focus: Field::Slug,
             error: None,
@@ -72,6 +79,14 @@ impl CreateForm {
 
     pub fn shows_deps(&self) -> bool {
         self.allowed.contains(&Strategy::Install)
+    }
+
+    pub fn submodules(&self) -> bool {
+        self.submodules
+    }
+
+    fn shows_submodules(&self) -> bool {
+        self.fields.contains(&Field::Submodules)
     }
 
     pub fn prefix(&self) -> &str {
@@ -163,6 +178,7 @@ impl CreateForm {
             Field::Deps => {
                 self.strategy_index = Self::cycle(self.strategy_index, self.allowed.len(), delta);
             }
+            Field::Submodules => self.submodules = !self.submodules,
             _ => {}
         }
     }
@@ -249,26 +265,33 @@ impl Component for CreateForm {
 
         let mut rows = vec![
             (
-                format!("{} slug     ", marker(Field::Slug)),
+                format!("{} slug       ", marker(Field::Slug)),
                 self.slug.value().to_string(),
             ),
             (
-                format!("{} prefix   ", marker(Field::Prefix)),
+                format!("{} prefix     ", marker(Field::Prefix)),
                 prefix_display,
             ),
             (
-                format!("{} base     ", marker(Field::Base)),
+                format!("{} base       ", marker(Field::Base)),
                 self.base.value().to_string(),
             ),
         ];
         if self.shows_deps() {
             rows.push((
-                format!("{} deps     ", marker(Field::Deps)),
+                format!("{} deps       ", marker(Field::Deps)),
                 format!("‹ {} ›", self.strategy().label()),
             ));
         }
+        if self.shows_submodules() {
+            let label = if self.submodules { "init" } else { "skip" };
+            rows.push((
+                format!("{} submodules ", marker(Field::Submodules)),
+                format!("‹ {label} ›"),
+            ));
+        }
 
-        // Only the typed fields get a cursor; prefix and deps are cycled with ←/→.
+        // Only the typed fields get a cursor; the rest are cycled with ←/→.
         if let Some(cursor) = self.focused_text().map(TextInput::cursor)
             && let Some(row) = self.fields.iter().position(|field| *field == self.focus)
             && let Some((prefix, _)) = rows.get(row)
@@ -307,7 +330,7 @@ impl Component for CreateForm {
         }
 
         let cycle_hint = match self.focus {
-            Field::Prefix | Field::Deps => "Cycle: ←→ | ",
+            Field::Prefix | Field::Deps | Field::Submodules => "Cycle: ←→ | ",
             _ => "",
         };
         Paragraph::new(
@@ -400,6 +423,17 @@ mod tests {
             ],
             String::from("develop"),
             vec![Strategy::Install, Strategy::None],
+            false,
+        )
+    }
+
+    fn form_with_submodules() -> CreateForm {
+        CreateForm::new(
+            String::from("spectra"),
+            vec![String::from("feature/")],
+            String::from("develop"),
+            vec![Strategy::Install, Strategy::None],
+            true,
         )
     }
 
@@ -409,6 +443,7 @@ mod tests {
             vec![String::from("feature/")],
             String::from("develop"),
             vec![],
+            false,
         )
     }
 
@@ -694,7 +729,7 @@ mod tests {
         // Two cells back from the end-of-value column asserted above.
         assert_eq!(
             terminal.backend().cursor_position(),
-            Position::from((19, 1))
+            Position::from((21, 1))
         );
     }
 
@@ -704,10 +739,10 @@ mod tests {
         type_str(&mut form, "spe-11667");
         let terminal = render_to_terminal(&mut form);
         assert!(terminal.backend().cursor_visible());
-        // "> slug     spe-11667" is 20 cells, starting one cell inside the border.
+        // "> slug       spe-11667" is 22 cells, starting one cell inside the border.
         assert_eq!(
             terminal.backend().cursor_position(),
-            Position::from((21, 1))
+            Position::from((23, 1))
         );
     }
 
@@ -717,7 +752,7 @@ mod tests {
         assert!(terminal.backend().cursor_visible());
         assert_eq!(
             terminal.backend().cursor_position(),
-            Position::from((12, 1))
+            Position::from((14, 1))
         );
     }
 
@@ -728,10 +763,10 @@ mod tests {
         form.handle_event_key(key(KeyCode::Down));
         let terminal = render_to_terminal(&mut form);
         assert!(terminal.backend().cursor_visible());
-        // "> base     develop" is 18 cells, on the third field row.
+        // "> base       develop" is 20 cells, on the third field row.
         assert_eq!(
             terminal.backend().cursor_position(),
-            Position::from((19, 3))
+            Position::from((21, 3))
         );
     }
 
@@ -787,6 +822,7 @@ mod tests {
             vec![String::from("feature/")],
             String::from("develop"),
             vec![Strategy::None],
+            false,
         );
         let text = dump(&mut form);
         assert!(!text.contains("deps"), "{text}");
@@ -800,12 +836,61 @@ mod tests {
             vec![String::from("feature/")],
             String::from("develop"),
             vec![Strategy::None],
+            false,
         );
         assert_eq!(form.focus(), Field::Slug);
         form.handle_event_key(key(KeyCode::Tab));
         assert_eq!(form.focus(), Field::Prefix);
         form.handle_event_key(key(KeyCode::Tab));
         assert_eq!(form.focus(), Field::Base);
+        form.handle_event_key(key(KeyCode::Tab));
+        assert_eq!(form.focus(), Field::Slug);
+    }
+
+    #[test]
+    fn test_submodules_default_to_being_initialised() {
+        assert!(form_with_submodules().submodules());
+    }
+
+    #[test]
+    fn test_a_repo_without_a_gitmodules_never_initialises_submodules() {
+        assert!(!form().submodules());
+    }
+
+    #[test]
+    fn test_submodules_cycle_off_with_the_arrow_keys() {
+        let mut form = form_with_submodules();
+        while form.focus() != Field::Submodules {
+            form.handle_event_key(key(KeyCode::Tab));
+        }
+
+        form.handle_event_key(key(KeyCode::Right));
+
+        assert!(!form.submodules());
+    }
+
+    #[test]
+    fn test_render_shows_the_submodules_row_for_a_superproject() {
+        let text = dump(&mut form_with_submodules());
+        assert!(text.contains("submodules"), "{text}");
+        assert!(text.contains("init"), "{text}");
+    }
+
+    #[test]
+    fn test_render_omits_the_submodules_row_without_a_gitmodules() {
+        let text = dump(&mut form());
+        assert!(!text.contains("submodules"), "{text}");
+    }
+
+    #[test]
+    fn test_focus_reaches_submodules_after_deps() {
+        let mut form = form_with_submodules();
+        for _ in 0..3 {
+            form.handle_event_key(key(KeyCode::Tab));
+        }
+        assert_eq!(form.focus(), Field::Deps);
+        form.handle_event_key(key(KeyCode::Tab));
+        assert_eq!(form.focus(), Field::Submodules);
         form.handle_event_key(key(KeyCode::Tab));
         assert_eq!(form.focus(), Field::Slug);
     }
