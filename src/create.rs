@@ -15,6 +15,9 @@ pub enum Action {
         manager: node::Manager,
     },
     InitSubmodules,
+    CopyLocal {
+        rel: PathBuf,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -34,6 +37,7 @@ pub fn plan_steps(
     strategy: Strategy,
     submodules: bool,
     targets: &[Target],
+    copy: &[PathBuf],
 ) -> Vec<Step> {
     let mut steps = vec![Step {
         label: format!("git worktree add  {branch}"),
@@ -47,6 +51,13 @@ pub fn plan_steps(
         steps.push(Step {
             label: String::from("git submodule update --init --recursive"),
             action: Action::InitSubmodules,
+        });
+    }
+
+    for rel in copy {
+        steps.push(Step {
+            label: format!("copy  {}", rel.display()),
+            action: Action::CopyLocal { rel: rel.clone() },
         });
     }
 
@@ -72,7 +83,9 @@ pub fn plan_steps(
 
 pub fn skip_reason(dest: &Path, step: &Step) -> Option<&'static str> {
     let rel = match &step.action {
-        Action::AddWorktree { .. } | Action::InitSubmodules => return None,
+        Action::AddWorktree { .. } | Action::InitSubmodules | Action::CopyLocal { .. } => {
+            return None;
+        }
         Action::Install { rel, .. } => rel,
     };
     if dest.join(rel).is_dir() {
@@ -155,6 +168,7 @@ fn run_step(repo_source: &Path, request: &Request, step: &Step) -> anyhow::Resul
             node::install(*manager, &dir)?;
             Ok(String::from("installed"))
         }
+        Action::CopyLocal { rel } => crate::manifest::copy_file(repo_source, &request.dest, rel),
     }
 }
 
@@ -181,7 +195,14 @@ mod tests {
             rel: PathBuf::from("app"),
             lockfile: Some(node::Manager::Pnpm),
         }];
-        let steps = plan_steps("feature/x", "develop", Strategy::Install, false, &targets);
+        let steps = plan_steps(
+            "feature/x",
+            "develop",
+            Strategy::Install,
+            false,
+            &targets,
+            &[],
+        );
         assert_eq!(
             steps[1].action,
             Action::Install {
@@ -197,7 +218,14 @@ mod tests {
             rel: PathBuf::from("app"),
             lockfile: Some(node::Manager::Pnpm),
         }];
-        let steps = plan_steps("feature/x", "develop", Strategy::Install, false, &targets);
+        let steps = plan_steps(
+            "feature/x",
+            "develop",
+            Strategy::Install,
+            false,
+            &targets,
+            &[],
+        );
         assert_eq!(steps[1].label, "pnpm install  app");
     }
 
@@ -213,14 +241,28 @@ mod tests {
                 lockfile: Some(node::Manager::Npm),
             },
         ];
-        let steps = plan_steps("feature/x", "develop", Strategy::Install, false, &targets);
+        let steps = plan_steps(
+            "feature/x",
+            "develop",
+            Strategy::Install,
+            false,
+            &targets,
+            &[],
+        );
         assert_eq!(steps.len(), 2);
         assert_eq!(steps[1].label, "npm ci  app");
     }
 
     #[test]
     fn test_plan_steps_always_starts_with_the_worktree_add() {
-        let steps = plan_steps("feature/x", "develop", Strategy::None, false, &targets());
+        let steps = plan_steps(
+            "feature/x",
+            "develop",
+            Strategy::None,
+            false,
+            &targets(),
+            &[],
+        );
         assert_eq!(steps.len(), 1);
         assert!(matches!(steps[0].action, Action::AddWorktree { .. }));
         assert!(steps[0].label.contains("feature/x"));
@@ -228,7 +270,14 @@ mod tests {
 
     #[test]
     fn test_plan_steps_install_covers_every_package() {
-        let steps = plan_steps("feature/x", "develop", Strategy::Install, false, &targets());
+        let steps = plan_steps(
+            "feature/x",
+            "develop",
+            Strategy::Install,
+            false,
+            &targets(),
+            &[],
+        );
         assert_eq!(steps.len(), 3);
         assert!(matches!(steps[1].action, Action::Install { .. }));
         assert!(matches!(steps[2].action, Action::Install { .. }));
@@ -283,7 +332,14 @@ mod tests {
             rel: PathBuf::new(),
             lockfile: Some(node::Manager::Npm),
         }];
-        let steps = plan_steps("feature/x", "develop", Strategy::Install, false, &targets);
+        let steps = plan_steps(
+            "feature/x",
+            "develop",
+            Strategy::Install,
+            false,
+            &targets,
+            &[],
+        );
         assert_eq!(steps[1].label, "npm ci");
     }
 
@@ -396,7 +452,14 @@ mod tests {
 
     #[test]
     fn test_plan_steps_includes_the_submodule_init_when_asked() {
-        let steps = plan_steps("feature/x", "develop", Strategy::None, true, &targets());
+        let steps = plan_steps(
+            "feature/x",
+            "develop",
+            Strategy::None,
+            true,
+            &targets(),
+            &[],
+        );
         assert_eq!(steps.len(), 2);
         assert_eq!(steps[1].action, Action::InitSubmodules);
         assert_eq!(steps[1].label, "git submodule update --init --recursive");
@@ -404,7 +467,14 @@ mod tests {
 
     #[test]
     fn test_plan_steps_leaves_out_the_submodule_init_when_not_asked() {
-        let steps = plan_steps("feature/x", "develop", Strategy::None, false, &targets());
+        let steps = plan_steps(
+            "feature/x",
+            "develop",
+            Strategy::None,
+            false,
+            &targets(),
+            &[],
+        );
         assert!(
             !steps
                 .iter()
@@ -414,7 +484,14 @@ mod tests {
 
     #[test]
     fn test_plan_steps_puts_the_submodule_init_before_every_install() {
-        let steps = plan_steps("feature/x", "develop", Strategy::Install, true, &targets());
+        let steps = plan_steps(
+            "feature/x",
+            "develop",
+            Strategy::Install,
+            true,
+            &targets(),
+            &[],
+        );
         let init = steps
             .iter()
             .position(|step| step.action == Action::InitSubmodules)
@@ -438,8 +515,70 @@ mod tests {
 
     #[test]
     fn test_plan_steps_labels_a_nested_package_with_its_path() {
-        let steps = plan_steps("feature/x", "develop", Strategy::Install, false, &targets());
+        let steps = plan_steps(
+            "feature/x",
+            "develop",
+            Strategy::Install,
+            false,
+            &targets(),
+            &[],
+        );
         assert_eq!(steps[1].label, "npm ci  app");
         assert_eq!(steps[2].label, "npm ci  tools");
+    }
+
+    #[test]
+    fn test_plan_steps_adds_a_copy_step_for_every_declared_file() {
+        let copy = [PathBuf::from(".env"), PathBuf::from("config/local.yml")];
+        let steps = plan_steps("feature/x", "develop", Strategy::None, false, &[], &copy);
+
+        let labels: Vec<&str> = steps
+            .iter()
+            .filter(|step| matches!(step.action, Action::CopyLocal { .. }))
+            .map(|step| step.label.as_str())
+            .collect();
+
+        assert_eq!(labels, vec!["copy  .env", "copy  config/local.yml"]);
+    }
+
+    #[test]
+    fn test_plan_steps_puts_every_copy_after_the_submodule_init() {
+        let copy = [PathBuf::from(".env")];
+        let steps = plan_steps("feature/x", "develop", Strategy::None, true, &[], &copy);
+
+        let submodules = steps
+            .iter()
+            .position(|step| step.action == Action::InitSubmodules)
+            .unwrap();
+        let first_copy = steps
+            .iter()
+            .position(|step| matches!(step.action, Action::CopyLocal { .. }))
+            .unwrap();
+
+        assert!(submodules < first_copy);
+    }
+
+    #[test]
+    fn test_plan_steps_puts_every_copy_before_every_install() {
+        let copy = [PathBuf::from(".env")];
+        let steps = plan_steps(
+            "feature/x",
+            "develop",
+            Strategy::Install,
+            false,
+            &targets(),
+            &copy,
+        );
+
+        let last_copy = steps
+            .iter()
+            .rposition(|step| matches!(step.action, Action::CopyLocal { .. }))
+            .unwrap();
+        let first_install = steps
+            .iter()
+            .position(|step| matches!(step.action, Action::Install { .. }))
+            .unwrap();
+
+        assert!(last_copy < first_install);
     }
 }

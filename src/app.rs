@@ -105,6 +105,7 @@ enum Screen {
 
 pub struct App {
     repo: Repo,
+    copy: Vec<PathBuf>,
     list: ListComponent,
     form: Option<CreateForm>,
     confirm: Option<ConfirmDelete>,
@@ -120,11 +121,12 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(repo: Repo, config: Config) -> Result<App> {
+    pub fn new(repo: Repo, config: Config, copy: Vec<PathBuf>) -> Result<App> {
         let list = make_list(&repo)?;
         let dirty = Some(dirty::spawn(list.paths()));
         let mut app = App {
             repo,
+            copy,
             list,
             form: None,
             confirm: None,
@@ -366,6 +368,7 @@ impl App {
             form.strategy(),
             form.submodules(),
             &targets,
+            &self.copy,
         );
         let labels: Vec<String> = steps.iter().map(|step| step.label.clone()).collect();
 
@@ -471,7 +474,12 @@ mod tests {
     fn app_on_the_list_screen(tmp: &tempfile::TempDir) -> App {
         let root = tmp.path().join("main");
         std::fs::create_dir_all(&root).unwrap();
-        App::new(repo_with_a_second_worktree(&root), Config::default()).unwrap()
+        App::new(
+            repo_with_a_second_worktree(&root),
+            Config::default(),
+            Vec::new(),
+        )
+        .unwrap()
     }
 
     #[test]
@@ -483,7 +491,7 @@ mod tests {
             default_mode: Mode::Create,
             ..Config::default()
         };
-        let app = App::new(repo_with_a_second_worktree(&root), config).unwrap();
+        let app = App::new(repo_with_a_second_worktree(&root), config, Vec::new()).unwrap();
         assert!(matches!(app.screen, Screen::Create));
         assert!(app.form.is_some());
     }
@@ -497,7 +505,7 @@ mod tests {
             default_mode: Mode::Create,
             ..Config::default()
         };
-        let mut app = App::new(repo_with_a_second_worktree(&root), config).unwrap();
+        let mut app = App::new(repo_with_a_second_worktree(&root), config, Vec::new()).unwrap();
         press(&mut app, KeyCode::Esc);
         assert!(matches!(app.screen, Screen::List));
         assert!(!app.quit);
@@ -681,7 +689,12 @@ mod tests {
             &["remote", "add", "gitlab", remote.to_str().unwrap()],
         );
         run(&root, &["push", "-q", "-u", "gitlab", "main", "side"]);
-        App::new(Repo::discover(&root).unwrap(), Config::default()).unwrap()
+        App::new(
+            Repo::discover(&root).unwrap(),
+            Config::default(),
+            Vec::new(),
+        )
+        .unwrap()
     }
 
     fn remote_heads(tmp: &tempfile::TempDir) -> String {

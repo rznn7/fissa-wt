@@ -4,6 +4,7 @@ mod config;
 mod create;
 mod dirty;
 mod git;
+mod manifest;
 mod naming;
 mod node;
 mod remove;
@@ -70,8 +71,9 @@ fn main() -> anyhow::Result<()> {
     let config = config::load()?;
     components::theme::install(config.icons);
     let repo = git::Repo::discover(&std::env::current_dir()?)?;
+    let copy = manifest::load(&repo.source)?;
     let mut terminal = app::init_terminal()?;
-    let result = app::App::new(repo, config).and_then(|app| app.run(&mut terminal));
+    let result = app::App::new(repo, config, copy).and_then(|app| app.run(&mut terminal));
     app::restore_terminal()?;
 
     if let Some(path) = result? {
