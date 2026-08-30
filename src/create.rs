@@ -45,7 +45,7 @@ pub fn plan_steps(
 
     if submodules {
         steps.push(Step {
-            label: String::from("git submodule update  --init"),
+            label: String::from("git submodule update --init --recursive"),
             action: Action::InitSubmodules,
         });
     }
@@ -399,7 +399,7 @@ mod tests {
         let steps = plan_steps("feature/x", "develop", Strategy::None, true, &targets());
         assert_eq!(steps.len(), 2);
         assert_eq!(steps[1].action, Action::InitSubmodules);
-        assert_eq!(steps[1].label, "git submodule update  --init");
+        assert_eq!(steps[1].label, "git submodule update --init --recursive");
     }
 
     #[test]
@@ -430,7 +430,7 @@ mod tests {
     fn test_skip_reason_never_skips_the_submodule_init() {
         let tmp = tempfile::tempdir().unwrap();
         let step = Step {
-            label: String::from("git submodule update  --init"),
+            label: String::from("git submodule update --init --recursive"),
             action: Action::InitSubmodules,
         };
         assert_eq!(skip_reason(tmp.path(), &step), None);

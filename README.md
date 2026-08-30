@@ -12,6 +12,8 @@ straight into it.
 - **Delete in bulk**: extend the selection, confirm once, deletions run in parallel.
 - **Dirty worktrees** are marked `●` and refused unless you force with `f`.
 - **Branch cleanup**: optionally drop the local branch, the remote one, or both.
+- **Submodules**, in repos that have them, are initialised recursively on create,
+  before any install runs.
 - **npm, pnpm, yarn, bun and deno**: new worktrees install with whichever manager
   each lockfile names, at any depth, so they build on arrival.
 
