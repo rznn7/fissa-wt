@@ -1,7 +1,7 @@
 [package]
 name = "fissa-wt"
 version = "0.1.0"
-description = "Instant git worktrees, with optional npm and pnpm installs"
+description = "Instant git worktrees, with optional npm, pnpm and yarn installs"
 authors = ["rznn7 <160644362+rznn7@users.noreply.github.com>"]
 license = "MIT"
 edition = "2024"
