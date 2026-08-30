@@ -1,3 +1,4 @@
+use std::ffi::OsStr;
 use std::path::{Component, Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow};
@@ -55,6 +56,11 @@ fn validate(entry: &str) -> Result<PathBuf> {
             "copy entry '{entry}' must not leave the repository root"
         ));
     }
+    if path.components().next() == Some(Component::Normal(OsStr::new(".git"))) {
+        return Err(anyhow!(
+            "copy entry '{entry}' must not reach into the git directory"
+        ));
+    }
 
     Ok(path)
 }
@@ -62,14 +68,42 @@ fn validate(entry: &str) -> Result<PathBuf> {
 /// A missing manifest is not an error: it is how most repositories run.
 pub fn load(source_root: &Path) -> Result<Vec<PathBuf>> {
     let path = source_root.join(".fissa.toml");
-    let Ok(text) = std::fs::read_to_string(&path) else {
-        return Ok(Vec::new());
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => {
+            return Err(error).with_context(|| format!("could not read {}", path.display()));
+        }
     };
     parse(&text).with_context(|| format!("invalid manifest in {}", path.display()))
 }
 
+fn resolve_in_root(root: &Path, rel: &Path) -> Result<PathBuf, &'static str> {
+    let mut path = root.to_path_buf();
+    let mut components = rel.components().peekable();
+
+    while let Some(component) = components.next() {
+        path.push(component);
+        if components.peek().is_none() {
+            break;
+        }
+        match std::fs::symlink_metadata(&path) {
+            Ok(meta) if meta.file_type().is_symlink() => {
+                return Err("skipped (symlink in the path)");
+            }
+            Ok(meta) if !meta.is_dir() => return Err("skipped (a file blocks the path)"),
+            _ => {}
+        }
+    }
+
+    Ok(path)
+}
+
 pub fn copy_file(source_root: &Path, dest_root: &Path, rel: &Path) -> Result<String> {
-    let source = source_root.join(rel);
+    let source = match resolve_in_root(source_root, rel) {
+        Ok(source) => source,
+        Err(detail) => return Ok(String::from(detail)),
+    };
     let Ok(meta) = std::fs::symlink_metadata(&source) else {
         return Ok(String::from("skipped (not in the source)"));
     };
@@ -80,7 +114,10 @@ pub fn copy_file(source_root: &Path, dest_root: &Path, rel: &Path) -> Result<Str
         return Ok(String::from("skipped (not a regular file)"));
     }
 
-    let dest = dest_root.join(rel);
+    let dest = match resolve_in_root(dest_root, rel) {
+        Ok(dest) => dest,
+        Err(detail) => return Ok(String::from(detail)),
+    };
     if std::fs::symlink_metadata(&dest).is_ok() {
         return Ok(String::from("skipped (already in the worktree)"));
     }
@@ -290,6 +327,80 @@ mod tests {
             std::fs::read_to_string(dest.path().join("config/local.yml")).unwrap(),
             "k: v"
         );
+    }
+
+    #[test]
+    fn test_parse_rejects_an_entry_inside_the_git_directory() {
+        let message = rejection(".git/hooks/pre-commit");
+        assert!(message.contains(".git/hooks/pre-commit"), "{message}");
+    }
+
+    #[test]
+    fn test_copy_file_skips_a_symlinked_directory_in_the_source_path() {
+        let outside = tempfile::tempdir().unwrap();
+        let source = tempfile::tempdir().unwrap();
+        let dest = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("token"), "not yours").unwrap();
+        std::os::unix::fs::symlink(outside.path(), source.path().join("esc")).unwrap();
+
+        let detail = copy_file(source.path(), dest.path(), Path::new("esc/token")).unwrap();
+
+        assert_eq!(detail, "skipped (symlink in the path)");
+        assert!(!dest.path().join("esc").exists());
+        assert!(!outside.path().join("esc").exists());
+        assert_eq!(
+            std::fs::read_dir(outside.path()).unwrap().count(),
+            1,
+            "nothing may be written outside the roots"
+        );
+    }
+
+    #[test]
+    fn test_copy_file_skips_a_symlinked_directory_in_the_destination_path() {
+        let outside = tempfile::tempdir().unwrap();
+        let source = tempfile::tempdir().unwrap();
+        let dest = tempfile::tempdir().unwrap();
+        std::fs::create_dir(source.path().join("esc")).unwrap();
+        std::fs::write(source.path().join("esc/token"), "TOKEN=1").unwrap();
+        std::os::unix::fs::symlink(outside.path(), dest.path().join("esc")).unwrap();
+
+        let detail = copy_file(source.path(), dest.path(), Path::new("esc/token")).unwrap();
+
+        assert_eq!(detail, "skipped (symlink in the path)");
+        assert!(!outside.path().join("token").exists());
+        assert_eq!(
+            std::fs::read_dir(outside.path()).unwrap().count(),
+            0,
+            "nothing may be written outside the worktree root"
+        );
+    }
+
+    #[test]
+    fn test_copy_file_skips_a_file_standing_where_a_destination_parent_belongs() {
+        let source = tempfile::tempdir().unwrap();
+        let dest = tempfile::tempdir().unwrap();
+        std::fs::create_dir(source.path().join("config")).unwrap();
+        std::fs::write(source.path().join("config/local.yml"), "k: v").unwrap();
+        std::fs::write(dest.path().join("config"), "i am a file").unwrap();
+
+        let detail = copy_file(source.path(), dest.path(), Path::new("config/local.yml")).unwrap();
+
+        assert_eq!(detail, "skipped (a file blocks the path)");
+        assert_eq!(
+            std::fs::read_to_string(dest.path().join("config")).unwrap(),
+            "i am a file"
+        );
+    }
+
+    #[test]
+    fn test_load_reports_a_manifest_it_cannot_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".fissa.toml");
+        std::fs::create_dir(&path).unwrap();
+
+        let message = load(dir.path()).unwrap_err().to_string();
+
+        assert!(message.contains(&path.display().to_string()), "{message}");
     }
 
     #[test]
