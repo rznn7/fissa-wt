@@ -1,6 +1,6 @@
 # fissa-wt
 
-A TUI for git worktrees. Create one from a short slug, install its npm deps, and `cd`
+A TUI for git worktrees. Create one from a short slug, install its deps, and `cd`
 straight into it.
 
 ## Features
@@ -12,8 +12,8 @@ straight into it.
 - **Delete in bulk**: extend the selection, confirm once, deletions run in parallel.
 - **Dirty worktrees** are marked `●` and refused unless you force with `f`.
 - **Branch cleanup**: optionally drop the local branch, the remote one, or both.
-- **npm, pnpm and yarn**: new worktrees install with whichever manager each lockfile names,
-  at any depth, so they build on arrival.
+- **npm, pnpm, yarn, bun and deno**: new worktrees install with whichever manager
+  each lockfile names, at any depth, so they build on arrival.
 
 ## Install
 

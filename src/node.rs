@@ -27,6 +27,8 @@ pub enum Manager {
     Pnpm,
     Yarn1,
     YarnBerry,
+    Bun,
+    Deno,
 }
 
 impl Manager {
@@ -35,6 +37,8 @@ impl Manager {
             Manager::Npm => "npm ci",
             Manager::Pnpm => "pnpm install",
             Manager::Yarn1 | Manager::YarnBerry => "yarn install",
+            Manager::Bun => "bun install",
+            Manager::Deno => "deno install",
         }
     }
 
@@ -44,6 +48,8 @@ impl Manager {
             Manager::Pnpm => ("pnpm", &["install", "--frozen-lockfile"]),
             Manager::Yarn1 => ("yarn", &["install", "--frozen-lockfile"]),
             Manager::YarnBerry => ("yarn", &["install", "--immutable"]),
+            Manager::Bun => ("bun", &["install", "--frozen-lockfile"]),
+            Manager::Deno => ("deno", &["install", "--frozen"]),
         }
     }
 }
@@ -114,13 +120,48 @@ fn manager_for_lockfile(name: &str, path: &Path) -> Option<Manager> {
         "package-lock.json" | "npm-shrinkwrap.json" => Some(Manager::Npm),
         "pnpm-lock.yaml" => Some(Manager::Pnpm),
         "yarn.lock" => Some(yarn_flavour(path)),
+        "bun.lock" | "bun.lockb" => Some(Manager::Bun),
+        "deno.lock" => Some(Manager::Deno),
         _ => None,
     }
 }
 
+/// `yarn set version` records the version it installed, so the field outranks the
+/// lockfile; the sniff below only covers repos that carry no field.
+fn yarn_flavour(lockfile: &Path) -> Manager {
+    if let Some(dir) = lockfile.parent()
+        && let Some(major) = declared_yarn_major(&dir.join("package.json"))
+    {
+        return if major > 1 {
+            Manager::YarnBerry
+        } else {
+            Manager::Yarn1
+        };
+    }
+    sniff_yarn_flavour(lockfile)
+}
+
+fn declared_yarn_major(package_json: &Path) -> Option<u32> {
+    let version = package_manager_field(package_json)?;
+    let version = version.trim_start_matches('^').strip_prefix("yarn@")?;
+    version
+        .chars()
+        .take_while(char::is_ascii_digit)
+        .collect::<String>()
+        .parse()
+        .ok()
+}
+
+fn package_manager_field(package_json: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(package_json).ok()?;
+    let json: serde_json::Value = serde_json::from_str(&text).ok()?;
+
+    Some(json.get("packageManager")?.as_str()?.to_string())
+}
+
 /// Berry stamps a `__metadata:` block near the top; yarn 1 never does. A lockfile we
 /// cannot read is read as yarn 1, whose flag at least fails loudly under berry.
-fn yarn_flavour(path: &Path) -> Manager {
+fn sniff_yarn_flavour(path: &Path) -> Manager {
     let mut head = [0u8; 4096];
     let read = std::fs::File::open(path)
         .and_then(|file| file.take(head.len() as u64).read(&mut head))
@@ -356,6 +397,108 @@ mod tests {
         assert_eq!(targets[0].lockfile, Some(Manager::Yarn1));
     }
 
+    fn write_pkg_json(root: &Path, rel: &str, body: &str) {
+        let dir = root.join(rel);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("package.json"), body).unwrap();
+    }
+
+    /// `yarn set version` writes the field, so it outranks a lockfile that has not
+    /// been regenerated since the migration.
+    #[test]
+    fn test_package_manager_field_promotes_a_classic_looking_lockfile_to_berry() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        write_pkg_json(root, "app", r#"{"packageManager": "yarn@4.1.0"}"#);
+        fs::write(root.join("app/yarn.lock"), "# yarn lockfile v1\n").unwrap();
+
+        let targets = discover_targets(root);
+        assert_eq!(targets[0].lockfile, Some(Manager::YarnBerry));
+    }
+
+    #[test]
+    fn test_package_manager_field_demotes_a_metadata_lockfile_to_classic() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        write_pkg_json(root, "app", r#"{"packageManager": "yarn@1.22.19"}"#);
+        fs::write(root.join("app/yarn.lock"), "__metadata:\n").unwrap();
+
+        let targets = discover_targets(root);
+        assert_eq!(targets[0].lockfile, Some(Manager::Yarn1));
+    }
+
+    #[test]
+    fn test_package_manager_field_tolerates_a_sha_suffix() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        write_pkg_json(
+            root,
+            "app",
+            r#"{"packageManager": "yarn@4.1.0+sha224.0000deadbeef"}"#,
+        );
+        fs::write(root.join("app/yarn.lock"), "# yarn lockfile v1\n").unwrap();
+
+        let targets = discover_targets(root);
+        assert_eq!(targets[0].lockfile, Some(Manager::YarnBerry));
+    }
+
+    #[test]
+    fn test_a_malformed_package_json_falls_back_to_the_lockfile_sniff() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        write_pkg_json(root, "app", "{ not json at all");
+        fs::write(root.join("app/yarn.lock"), "__metadata:\n").unwrap();
+
+        let targets = discover_targets(root);
+        assert_eq!(targets[0].lockfile, Some(Manager::YarnBerry));
+    }
+
+    /// The lockfile that is actually present decides which manager runs; a field
+    /// naming some other manager cannot make a frozen install work against it.
+    #[test]
+    fn test_a_field_naming_another_manager_leaves_the_lockfile_in_charge() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        write_pkg_json(root, "app", r#"{"packageManager": "pnpm@9.0.0"}"#);
+        fs::write(root.join("app/yarn.lock"), "__metadata:\n").unwrap();
+
+        let targets = discover_targets(root);
+        assert_eq!(targets[0].lockfile, Some(Manager::YarnBerry));
+    }
+
+    #[test]
+    fn test_discover_targets_recognises_the_text_bun_lockfile() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        write_pkg(root, "app");
+        fs::write(root.join("app/bun.lock"), "").unwrap();
+
+        let targets = discover_targets(root);
+        assert_eq!(targets[0].lockfile, Some(Manager::Bun));
+    }
+
+    #[test]
+    fn test_discover_targets_recognises_the_binary_bun_lockfile() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        write_pkg(root, "app");
+        fs::write(root.join("app/bun.lockb"), [0u8, 159, 146, 150]).unwrap();
+
+        let targets = discover_targets(root);
+        assert_eq!(targets[0].lockfile, Some(Manager::Bun));
+    }
+
+    #[test]
+    fn test_discover_targets_recognises_a_deno_lockfile() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        write_pkg(root, "app");
+        fs::write(root.join("app/deno.lock"), "{}").unwrap();
+
+        let targets = discover_targets(root);
+        assert_eq!(targets[0].lockfile, Some(Manager::Deno));
+    }
+
     #[test]
     fn test_discover_targets_keeps_each_managers_own_lockfile() {
         let tmp = tempfile::tempdir().unwrap();
@@ -385,6 +528,20 @@ mod tests {
             Manager::YarnBerry.command(),
             ("yarn", &["install", "--immutable"][..])
         );
+    }
+
+    #[test]
+    fn test_the_newer_runtimes_get_lockfile_respecting_commands_too() {
+        assert_eq!(
+            Manager::Bun.command(),
+            ("bun", &["install", "--frozen-lockfile"][..])
+        );
+        assert_eq!(
+            Manager::Deno.command(),
+            ("deno", &["install", "--frozen"][..])
+        );
+        assert_eq!(Manager::Bun.label(), "bun install");
+        assert_eq!(Manager::Deno.label(), "deno install");
     }
 
     #[test]
